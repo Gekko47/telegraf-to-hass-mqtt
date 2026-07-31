@@ -1,0 +1,18 @@
+name: hassfest
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          persist-credentials: false
+      - uses: home-assistant/actions/hassfest@ab22029681aa532bfe7de5774a9972d67bfbd2c0

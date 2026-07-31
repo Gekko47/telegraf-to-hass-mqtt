@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure telegraf_mqtt",
+        "data": {
+          "topic_pattern": "MQTT topic pattern",
+          "device_name": "Device name"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This topic pattern is already configured."
+    }
+  }
+}

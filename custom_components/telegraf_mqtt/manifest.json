@@ -1,0 +1,14 @@
+{
+  "domain": "telegraf_mqtt",
+  "name": "telegraf_mqtt",
+  "codeowners": ["@openai"],
+  "config_flow": true,
+  "dependencies": ["mqtt"],
+  "documentation": "https://github.com/Gekko47/telegraf-to-hass-mqtt",
+  "homeassistant": "2025.1.0",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/Gekko47/telegraf-to-hass-mqtt/issues",
+  "loggers": ["custom_components.telegraf_mqtt"],
+  "requirements": [],
+  "version": "0.0.0"
+}
