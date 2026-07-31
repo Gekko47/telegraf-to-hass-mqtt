@@ -18,6 +18,16 @@ def _install_fake_homeassistant(monkeypatch) -> None:
             self.runtime_data = None
             self.entry_id = "test-entry"
 
+    class FakeOptionsFlow:
+        def __init__(self, config_entry=None) -> None:
+            self.config_entry = config_entry
+
+        def async_show_form(self, step_id: str, data_schema) -> dict[str, object]:
+            return {"type": "form", "step_id": step_id, "data_schema": data_schema}
+
+        def async_create_entry(self, title: str, data: dict[str, object]) -> dict[str, object]:
+            return {"type": "create_entry", "title": title, "data": data}
+
     class FakeConfigFlow:
         VERSION = 1
         _configured_ids: set[str] = set()
@@ -61,6 +71,9 @@ def _install_fake_homeassistant(monkeypatch) -> None:
     class HomeAssistant:
         pass
 
+    def callback(func):
+        return func
+
     def _required(key: str, default: str | None = None):
         return _Required(key, default)
 
@@ -68,8 +81,10 @@ def _install_fake_homeassistant(monkeypatch) -> None:
     voluptuous.Schema = _Schema
     const.Platform = _Platform
     core.HomeAssistant = HomeAssistant
+    core.callback = callback
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigFlow = FakeConfigFlow
+    config_entries.OptionsFlow = FakeOptionsFlow
     data_entry_flow.FlowResult = dict
 
     homeassistant.config_entries = config_entries
