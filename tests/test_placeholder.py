@@ -250,6 +250,11 @@ def test_readme_documents_install_and_configuration() -> None:
     assert "Configure" in readme
 
 
+def test_repository_has_hacs_branding_assets() -> None:
+    assert Path("icon.png").exists()
+    assert Path("logo.png").exists()
+
+
 def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:
     _install_fake_homeassistant(monkeypatch)
 
