@@ -103,6 +103,35 @@ def test_descriptor_generation_sets_units_state_classes_and_immutable_tags() -> 
     assert isinstance(by_field["bytes_recv"].tags, MappingProxyType)
 
 
+def test_measurement_specific_naming_and_profile_categories() -> None:
+    parser = TelegrafParser()
+
+    sensors_descriptors = parser.parse(
+        json.dumps(
+            {
+                "name": "sensors",
+                "tags": {"host": "cachyos-gekko", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
+                "fields": {"temp_input": 52.0},
+                "timestamp": 1721664000,
+            }
+        )
+    )
+    disk_descriptors = parser.parse(
+        json.dumps(
+            {
+                "name": "disk",
+                "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+                "fields": {"used_percent": 63.5},
+                "timestamp": 1721664000,
+            }
+        )
+    )
+
+    assert [descriptor.name for descriptor in sensors_descriptors] == ["CPU Package Temperature"]
+    assert sensors_descriptors[0].entity_category is None
+    assert disk_descriptors[0].entity_category == "diagnostic"
+
+
 def test_parser_drops_invalid_json_and_unsupported_field_shapes() -> None:
     parser = TelegrafParser()
 

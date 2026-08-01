@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..models import MetricDescriptor, MetricValue, frozen_tags
+from ..naming import resolve_entity_category, resolve_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,11 +53,11 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 field=field,
                 value=value,
                 timestamp=timestamp_float,
-                name=build_fallback_name(measurement, clean_tags, field),
+                name=resolve_name(measurement, clean_tags, field),
                 native_unit=infer_native_unit(field),
                 suggested_device_class=infer_device_class(measurement, field),
                 suggested_state_class=infer_state_class(field, value),
-                entity_category=None,
+                entity_category=resolve_entity_category(measurement, field),
             )
         )
 

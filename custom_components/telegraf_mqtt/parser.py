@@ -6,13 +6,32 @@ import json
 import logging
 
 from .models import MetricDescriptor
-from .parsers.generic import parse_generic_payload
+from .parsers import (
+    parse_battery_payload,
+    parse_cpu_payload,
+    parse_disk_payload,
+    parse_generic_payload,
+    parse_mem_payload,
+    parse_net_payload,
+    parse_nvidia_gpu_payload,
+    parse_sensors_payload,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class TelegrafParser:
     """Parse raw Telegraf MQTT JSON payloads into metric descriptors."""
+
+    _PARSERS = {
+        "battery": parse_battery_payload,
+        "cpu": parse_cpu_payload,
+        "disk": parse_disk_payload,
+        "mem": parse_mem_payload,
+        "net": parse_net_payload,
+        "nvidia_gpu": parse_nvidia_gpu_payload,
+        "sensors": parse_sensors_payload,
+    }
 
     def parse(self, payload: str | bytes) -> list[MetricDescriptor]:
         """Parse a raw MQTT payload."""
@@ -27,7 +46,9 @@ class TelegrafParser:
             return []
 
         measurement = decoded.get("name")
-        if isinstance(measurement, str):
-            _LOGGER.debug("Unknown measurement %s; using generic parser", measurement)
+        if not isinstance(measurement, str):
+            _LOGGER.debug("Unsupported Telegraf payload shape")
+            return []
 
-        return parse_generic_payload(decoded)
+        handler = self._PARSERS.get(measurement, parse_generic_payload)
+        return handler(decoded)
