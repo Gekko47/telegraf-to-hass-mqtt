@@ -251,6 +251,11 @@ def test_readme_documents_install_and_configuration() -> None:
     assert "Configure" in readme
 
 
+def test_repository_has_diagnostics_and_changelog() -> None:
+    assert Path("custom_components/telegraf_mqtt/diagnostics.py").exists()
+    assert Path("CHANGELOG.md").exists()
+
+
 def test_repository_has_hacs_branding_assets() -> None:
     assert Path("icon.png").exists()
     assert Path("logo.png").exists()
