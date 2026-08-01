@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Configure telegraf_mqtt",
+        "title": "Configure Telegraf MQTT",
         "data": {
           "topic_pattern": "MQTT topic pattern",
           "device_name": "Device name",

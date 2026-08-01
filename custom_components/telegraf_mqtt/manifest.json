@@ -1,7 +1,7 @@
 {
   "domain": "telegraf_mqtt",
-  "name": "telegraf_mqtt",
-  "codeowners": ["@openai"],
+  "name": "Telegraf MQTT",
+  "codeowners": ["@Gekko47"],
   "config_flow": true,
   "dependencies": ["mqtt"],
   "documentation": "https://github.com/Gekko47/telegraf-to-hass-mqtt",

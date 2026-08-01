@@ -1,8 +1,10 @@
 import asyncio
 import importlib
+import json
 import sys
 import types
 from dataclasses import dataclass
+from pathlib import Path
 
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.registry import MetricRegistry
@@ -205,6 +207,24 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
 
     assert entity.is_on is True
     assert entity.available is True
+
+
+def test_manifest_and_translations_are_release_ready() -> None:
+    manifest_path = Path("custom_components/telegraf_mqtt/manifest.json")
+    strings_path = Path("custom_components/telegraf_mqtt/strings.json")
+    translations_path = Path("custom_components/telegraf_mqtt/translations/en.json")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    strings = json.loads(strings_path.read_text(encoding="utf-8"))
+    translations = json.loads(translations_path.read_text(encoding="utf-8"))
+
+    assert manifest["domain"] == "telegraf_mqtt"
+    assert manifest["name"] == "Telegraf MQTT"
+    assert manifest["codeowners"] == ["@Gekko47"]
+    assert manifest["documentation"].endswith("telegraf-to-hass-mqtt")
+    assert manifest["issue_tracker"].endswith("issues")
+    assert strings["config"]["step"]["user"]["data"]["topic_pattern"] == "MQTT topic pattern"
+    assert translations["config"]["step"]["options"]["title"] == "Configure options"
 
 
 def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:
