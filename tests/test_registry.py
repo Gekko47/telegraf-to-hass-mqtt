@@ -1,4 +1,5 @@
-from custom_components.telegraf_mqtt.registry import MetricDescriptor, MetricRegistry
+from custom_components.telegraf_mqtt.models import MetricDescriptor
+from custom_components.telegraf_mqtt.registry import MetricRegistry
 
 
 def test_registry_expiry_and_recovery() -> None:
@@ -11,7 +12,12 @@ def test_registry_expiry_and_recovery() -> None:
         tags={"host": "host1", "cpu": "cpu-total"},
         field="usage_idle",
         value=88.4,
+        timestamp=1721664000,
         name="CPU Usage Idle",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
     )
 
     registry.update(descriptor)
@@ -28,7 +34,12 @@ def test_registry_expiry_and_recovery() -> None:
             tags={"host": "host1", "cpu": "cpu-total"},
             field="usage_idle",
             value=89.0,
+            timestamp=1721664001,
             name="CPU Usage Idle",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
         )
     )
     assert registry.get("cpu_cpu-total_usage_idle").is_available is True
@@ -46,7 +57,12 @@ def test_registry_exclude_patterns_and_field_overrides() -> None:
         tags={"host": "host1"},
         field="used_percent",
         value=41.2,
+        timestamp=1721664000,
         name="Memory Used Percent",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
     )
 
     assert registry.update(descriptor) is False
@@ -58,13 +74,18 @@ def test_registry_exclude_patterns_and_field_overrides() -> None:
         tags={"host": "host1"},
         field="used_percent",
         value=41.2,
+        timestamp=1721664000,
         name="CPU Usage Idle",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
     )
     assert registry.update(descriptor) is True
     state = registry.get("cpu_usage_idle")
     assert state is not None
     assert state.descriptor.native_unit == "%"
-    assert state.descriptor.state_class == "measurement"
+    assert state.descriptor.suggested_state_class == "measurement"
 
 
 def test_registry_only_writes_state_on_real_change() -> None:
@@ -77,7 +98,12 @@ def test_registry_only_writes_state_on_real_change() -> None:
         tags={"host": "host1"},
         field="used_percent",
         value=41.2,
+        timestamp=1721664000,
         name="Memory Used Percent",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
     )
 
     def on_write(key: str, available: bool, value: object) -> None:
@@ -94,8 +120,55 @@ def test_registry_only_writes_state_on_real_change() -> None:
             tags={"host": "host1"},
             field="used_percent",
             value=41.3,
+            timestamp=1721664002,
             name="Memory Used Percent",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
         ),
         on_write=on_write,
     )
     assert len(calls) == 2
+
+
+def test_registry_discovers_once_and_does_not_write_for_timestamp_only_changes() -> None:
+    writes: list[str] = []
+    discovered: list[str] = []
+    registry = MetricRegistry(expire_after=5)
+
+    descriptor = MetricDescriptor(
+        unique_key="cpu_usage_idle",
+        measurement="cpu",
+        tags={"host": "host1"},
+        field="usage_idle",
+        value=88.4,
+        timestamp=1721664000,
+        name="CPU Usage Idle",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
+    )
+
+    assert registry.update(descriptor, on_write=lambda key, available, value: writes.append(key), on_discovered=discovered.append)
+    assert not registry.update(
+        MetricDescriptor(
+            unique_key="cpu_usage_idle",
+            measurement="cpu",
+            tags={"host": "host1"},
+            field="usage_idle",
+            value=88.4,
+            timestamp=1721664001,
+            name="CPU Usage Idle",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
+        ),
+        on_write=lambda key, available, value: writes.append(key),
+        on_discovered=discovered.append,
+    )
+
+    assert writes == ["cpu_usage_idle"]
+    assert discovered == ["cpu_usage_idle"]

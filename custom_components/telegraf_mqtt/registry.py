@@ -7,21 +7,7 @@ from fnmatch import fnmatch
 from time import monotonic
 from typing import Any, Callable
 
-
-@dataclass(frozen=True)
-class MetricDescriptor:
-    """Immutable descriptor for a single Telegraf metric field."""
-
-    unique_key: str
-    measurement: str
-    tags: dict[str, str]
-    field: str
-    value: Any
-    name: str
-    native_unit: str | None = None
-    device_class: str | None = None
-    state_class: str | None = None
-    entity_category: str | None = None
+from .models import MetricDescriptor
 
 
 @dataclass
@@ -59,6 +45,10 @@ class MetricRegistry:
         """Return the current state for a key if one already exists."""
         return self._states.get(unique_key)
 
+    def keys(self) -> tuple[str, ...]:
+        """Return known metric keys."""
+        return tuple(self._states)
+
     def _matches_exclude(self, unique_key: str) -> bool:
         return any(fnmatch(unique_key, pattern) for pattern in self._exclude_patterns)
 
@@ -73,15 +63,22 @@ class MetricRegistry:
             tags=descriptor.tags,
             field=descriptor.field,
             value=descriptor.value,
+            timestamp=descriptor.timestamp,
             name=descriptor.name,
             native_unit=override.get("native_unit", descriptor.native_unit),
-            device_class=override.get("device_class", descriptor.device_class),
-            state_class=override.get("state_class", descriptor.state_class),
+            suggested_device_class=override.get("device_class", descriptor.suggested_device_class),
+            suggested_state_class=override.get("state_class", descriptor.suggested_state_class),
             entity_category=override.get("entity_category", descriptor.entity_category),
         )
 
-    def update(self, descriptor: MetricDescriptor, *, on_write: Callable[[str, bool, Any], None] | None = None) -> bool:
-        """Store a descriptor and emit state updates only when the value or availability actually changes."""
+    def update(
+        self,
+        descriptor: MetricDescriptor,
+        *,
+        on_write: Callable[[str, bool, Any], None] | None = None,
+        on_discovered: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Store a descriptor and emit state updates only when value or availability changes."""
         descriptor = self._apply_overrides(descriptor)
         if self._matches_exclude(descriptor.unique_key):
             return False
@@ -95,13 +92,14 @@ class MetricRegistry:
                 last_updated=current_time,
                 is_available=True,
             )
+            if on_discovered is not None:
+                on_discovered(descriptor.unique_key)
             if on_write is not None:
                 on_write(descriptor.unique_key, True, descriptor.value)
             return True
 
-        previous = current.descriptor
         prior_available = current.is_available
-        changed = previous != descriptor or prior_available is False
+        changed = current.value != descriptor.value or prior_available is False
         if changed:
             self._states[descriptor.unique_key] = MetricState(
                 descriptor=descriptor,
@@ -112,6 +110,7 @@ class MetricRegistry:
                 on_write(descriptor.unique_key, True, descriptor.value)
             return True
 
+        current.descriptor = descriptor
         current.last_updated = current_time
         return False
 

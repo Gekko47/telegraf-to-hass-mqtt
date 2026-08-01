@@ -22,8 +22,8 @@ def _install_fake_homeassistant(monkeypatch) -> None:
         def __init__(self, config_entry=None) -> None:
             self.config_entry = config_entry
 
-        def async_show_form(self, step_id: str, data_schema) -> dict[str, object]:
-            return {"type": "form", "step_id": step_id, "data_schema": data_schema}
+        def async_show_form(self, step_id: str, data_schema, errors=None) -> dict[str, object]:
+            return {"type": "form", "step_id": step_id, "data_schema": data_schema, "errors": errors or {}}
 
         def async_create_entry(self, title: str, data: dict[str, object]) -> dict[str, object]:
             return {"type": "create_entry", "title": title, "data": data}
@@ -48,8 +48,8 @@ def _install_fake_homeassistant(monkeypatch) -> None:
         def async_create_entry(self, title: str, data: dict[str, str]) -> dict[str, object]:
             return {"type": "create_entry", "title": title, "data": data}
 
-        def async_show_form(self, step_id: str, data_schema) -> dict[str, object]:
-            return {"type": "form", "step_id": step_id, "data_schema": data_schema}
+        def async_show_form(self, step_id: str, data_schema, errors=None) -> dict[str, object]:
+            return {"type": "form", "step_id": step_id, "data_schema": data_schema, "errors": errors or {}}
 
         def add_suggested_values_to_schema(self, schema, values):
             return schema
@@ -77,7 +77,11 @@ def _install_fake_homeassistant(monkeypatch) -> None:
     def _required(key: str, default: str | None = None):
         return _Required(key, default)
 
+    def _optional(key: str, default=None):
+        return _Required(key, default)
+
     voluptuous.Required = _required
+    voluptuous.Optional = _optional
     voluptuous.Schema = _Schema
     const.Platform = _Platform
     core.HomeAssistant = HomeAssistant
