@@ -223,6 +223,7 @@ def test_manifest_and_translations_are_release_ready() -> None:
     assert manifest["codeowners"] == ["@Gekko47"]
     assert manifest["documentation"].endswith("telegraf-to-hass-mqtt")
     assert manifest["issue_tracker"].endswith("issues")
+    assert "homeassistant" not in manifest
     assert strings["config"]["step"]["user"]["data"]["topic_pattern"] == "MQTT topic pattern"
     assert translations["config"]["step"]["options"]["title"] == "Configure options"
 
@@ -253,6 +254,8 @@ def test_readme_documents_install_and_configuration() -> None:
 def test_repository_has_hacs_branding_assets() -> None:
     assert Path("icon.png").exists()
     assert Path("logo.png").exists()
+    assert Path("custom_components/telegraf_mqtt/brand/icon.png").exists()
+    assert Path("custom_components/telegraf_mqtt/brand/logo.png").exists()
 
 
 def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:
