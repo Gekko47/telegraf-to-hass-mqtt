@@ -1,6 +1,11 @@
 import asyncio
+import importlib
 import sys
 import types
+from dataclasses import dataclass
+
+from custom_components.telegraf_mqtt.models import MetricDescriptor
+from custom_components.telegraf_mqtt.registry import MetricRegistry
 
 
 def _install_fake_homeassistant(monkeypatch) -> None:
@@ -101,6 +106,105 @@ def _install_fake_homeassistant(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "homeassistant.core", core)
     monkeypatch.setitem(sys.modules, "homeassistant.const", const)
     monkeypatch.setitem(sys.modules, "voluptuous", voluptuous)
+
+
+def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
+    components = types.ModuleType("homeassistant.components")
+    binary_sensor = types.ModuleType("homeassistant.components.binary_sensor")
+    sensor = types.ModuleType("homeassistant.components.sensor")
+    config_entries = types.ModuleType("homeassistant.config_entries")
+    const = types.ModuleType("homeassistant.const")
+    core = types.ModuleType("homeassistant.core")
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    helpers = types.ModuleType("homeassistant.helpers")
+
+    class BinarySensorEntity:
+        def __init__(self) -> None:
+            self._attr_is_on = None
+
+    class SensorEntity:
+        pass
+
+    class ConfigEntry:
+        pass
+
+    class HomeAssistant:
+        pass
+
+    class DeviceInfo(dict):
+        pass
+
+    class UnitOfTemperature:
+        CELSIUS = "°C"
+
+    def callback(func):
+        return func
+
+    def async_dispatcher_connect(hass, signal, target):
+        return lambda: None
+
+    binary_sensor.BinarySensorEntity = BinarySensorEntity
+    sensor.SensorEntity = SensorEntity
+    config_entries.ConfigEntry = ConfigEntry
+    const.UnitOfTemperature = UnitOfTemperature
+    core.HomeAssistant = HomeAssistant
+    core.callback = callback
+    device_registry.DeviceInfo = DeviceInfo
+    dispatcher.async_dispatcher_connect = async_dispatcher_connect
+
+    monkeypatch.setitem(sys.modules, "homeassistant.components", components)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.binary_sensor", binary_sensor)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.sensor", sensor)
+    monkeypatch.setitem(sys.modules, "homeassistant.config_entries", config_entries)
+    monkeypatch.setitem(sys.modules, "homeassistant.const", const)
+    monkeypatch.setitem(sys.modules, "homeassistant.core", core)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
+
+
+@dataclass
+class RuntimeData:
+    registry: MetricRegistry
+    device_id: str = "entry-1"
+    device_name: str = "Telegraf MQTT"
+    manufacturer: str | None = None
+    model: str | None = None
+
+
+@dataclass
+class Entry:
+    runtime_data: RuntimeData
+    entry_id: str = "entry-1"
+
+
+def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
+    _install_fake_homeassistant(monkeypatch)
+    _install_binary_sensor_homeassistant_stubs(monkeypatch)
+
+    binary_sensor_module = importlib.import_module("custom_components.telegraf_mqtt.binary_sensor")
+    registry = MetricRegistry()
+    registry.update(
+        MetricDescriptor(
+            unique_key="link_up",
+            measurement="net",
+            tags={"host": "host1", "interface": "wlan0"},
+            field="link_up",
+            value=True,
+            timestamp=1721664000,
+            name="Link Up",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class=None,
+            entity_category=None,
+        )
+    )
+    entry = Entry(RuntimeData(registry=registry))
+    entity = binary_sensor_module.TelegrafMqttBinarySensor(entry, "link_up")
+
+    assert entity.is_on is True
+    assert entity.available is True
 
 
 def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:

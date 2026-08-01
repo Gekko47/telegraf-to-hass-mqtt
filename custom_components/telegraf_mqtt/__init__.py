@@ -38,7 +38,7 @@ from .registry import MetricRegistry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR] if Platform is not None else []
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR] if Platform is not None else []
 
 
 @dataclass
