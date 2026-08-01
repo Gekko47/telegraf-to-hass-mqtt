@@ -9,7 +9,17 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import CONF_DEVICE_NAME, CONF_TOPIC_PATTERN, DEFAULT_DEVICE_NAME, DEFAULT_TOPIC_PATTERN, DOMAIN
+from .const import (
+    CONF_DEVICE_NAME,
+    CONF_EXCLUDE_PATTERNS,
+    CONF_EXPIRE_AFTER,
+    CONF_FIELD_OVERRIDES,
+    CONF_TOPIC_PATTERN,
+    DEFAULT_DEVICE_NAME,
+    DEFAULT_EXPIRE_AFTER,
+    DEFAULT_TOPIC_PATTERN,
+    DOMAIN,
+)
 
 
 def _valid_subscription_topic(topic: str) -> bool:
@@ -48,9 +58,9 @@ class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional("exclude_patterns", default=[]): list,
-                    vol.Optional("field_overrides", default={}): dict,
-                    vol.Optional("expire_after", default=120): int,
+                    vol.Optional(CONF_EXCLUDE_PATTERNS, default=[]): list,
+                    vol.Optional(CONF_FIELD_OVERRIDES, default={}): dict,
+                    vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): int,
                 }
             ),
         )

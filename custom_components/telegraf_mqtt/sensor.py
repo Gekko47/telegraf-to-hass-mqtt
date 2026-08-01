@@ -48,19 +48,22 @@ class TelegrafMqttSensor(SensorEntity):
     def __init__(self, entry: ConfigEntry, unique_key: str) -> None:
         self._entry = entry
         self._unique_key = unique_key
-        state = entry.runtime_data.registry.get(unique_key)
+        self._refresh_descriptor_attributes()
+
+    def _refresh_descriptor_attributes(self) -> None:
+        state = self._entry.runtime_data.registry.get(self._unique_key)
         descriptor = state.descriptor
-        self._attr_unique_id = f"{DOMAIN}_{unique_key}"
+        self._attr_unique_id = f"{DOMAIN}_{self._unique_key}"
         self._attr_name = descriptor.name
         self._attr_native_unit_of_measurement = _normalize_native_unit(descriptor.native_unit)
         self._attr_device_class = descriptor.suggested_device_class
         self._attr_state_class = descriptor.suggested_state_class
         self._attr_entity_category = descriptor.entity_category
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.runtime_data.device_id)},
-            name=entry.runtime_data.device_name,
-            manufacturer=entry.runtime_data.manufacturer,
-            model=entry.runtime_data.model,
+            identifiers={(DOMAIN, self._entry.runtime_data.device_id)},
+            name=self._entry.runtime_data.device_name,
+            manufacturer=self._entry.runtime_data.manufacturer,
+            model=self._entry.runtime_data.model,
         )
 
     async def async_added_to_hass(self) -> None:
@@ -77,13 +80,20 @@ class TelegrafMqttSensor(SensorEntity):
     def _handle_metric_updated(self, unique_key: str) -> None:
         """Write HA state when this metric changes."""
         if unique_key == self._unique_key:
+            self._refresh_descriptor_attributes()
             self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Return whether this metric is currently available."""
+        state = self._entry.runtime_data.registry.get(self._unique_key)
+        return state is not None and state.is_available
 
     @property
     def native_value(self) -> Any:
         """Return the current registry value."""
         state = self._entry.runtime_data.registry.get(self._unique_key)
-        if state is None or not state.is_available:
+        if state is None:
             return None
         return state.value
 

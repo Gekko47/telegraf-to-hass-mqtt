@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Callable
 
 try:
@@ -12,14 +13,26 @@ try:
     from homeassistant.const import Platform
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.dispatcher import async_dispatcher_send
+    from homeassistant.helpers.event import async_track_time_interval
 except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test import isolation
     ConfigEntry = object
     Platform = None
     HomeAssistant = object
     mqtt = None
     async_dispatcher_send = None
+    async_track_time_interval = None
 
-from .const import CONF_DEVICE_NAME, CONF_TOPIC_PATTERN, DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+from .const import (
+    CONF_DEVICE_NAME,
+    CONF_EXCLUDE_PATTERNS,
+    CONF_EXPIRE_AFTER,
+    CONF_FIELD_OVERRIDES,
+    CONF_TOPIC_PATTERN,
+    DEFAULT_EXPIRE_AFTER,
+    DOMAIN,
+    SIGNAL_METRIC_UPDATED,
+    SIGNAL_NEW_METRIC,
+)
 from .parser import TelegrafParser
 from .registry import MetricRegistry
 
@@ -39,11 +52,17 @@ class TelegrafMqttRuntimeData:
     registry: MetricRegistry
     parser: TelegrafParser
     unsubscribe: Callable[[], None] | None = None
+    cancel_expiry: Callable[[], None] | None = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up telegraf_mqtt from a config entry."""
-    registry = MetricRegistry()
+    options = _options_from_entry(entry)
+    registry = MetricRegistry(
+        expire_after=options.expire_after,
+        exclude_patterns=options.exclude_patterns,
+        field_overrides=options.field_overrides,
+    )
     parser = TelegrafParser()
     device_name = entry.data[CONF_DEVICE_NAME]
     entry.runtime_data = TelegrafMqttRuntimeData(
@@ -80,6 +99,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.runtime_data.unsubscribe = await mqtt.async_subscribe(hass, topic_pattern, message_received)
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
 
+    if async_track_time_interval is not None:
+        _schedule_expiry_check(hass, entry)
+
+    if hasattr(entry, "async_on_unload") and hasattr(entry, "add_update_listener"):
+        entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
     return True
 
 
@@ -92,4 +117,67 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok and runtime_data.unsubscribe is not None:
         runtime_data.unsubscribe()
         runtime_data.unsubscribe = None
+    if unload_ok and runtime_data.cancel_expiry is not None:
+        runtime_data.cancel_expiry()
+        runtime_data.cancel_expiry = None
     return unload_ok
+
+
+@dataclass(frozen=True)
+class TelegrafMqttOptions:
+    """Normalized runtime options."""
+
+    expire_after: int
+    exclude_patterns: tuple[str, ...]
+    field_overrides: dict[str, dict[str, Any]]
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply options live without reloading the config entry."""
+    options = _options_from_entry(entry)
+    entry.runtime_data.registry.apply_options(
+        expire_after=options.expire_after,
+        exclude_patterns=options.exclude_patterns,
+        field_overrides=options.field_overrides,
+        on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
+    )
+    _schedule_expiry_check(hass, entry)
+
+
+def _options_from_entry(entry: ConfigEntry) -> TelegrafMqttOptions:
+    """Normalize config entry options into registry settings."""
+    raw_options = getattr(entry, "options", {}) or {}
+    return TelegrafMqttOptions(
+        expire_after=max(1, int(raw_options.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER))),
+        exclude_patterns=tuple(str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])),
+        field_overrides=dict(raw_options.get(CONF_FIELD_OVERRIDES, {})),
+    )
+
+
+def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Schedule or replace the periodic registry expiry check."""
+    if async_track_time_interval is None:
+        return
+
+    runtime_data = entry.runtime_data
+    if runtime_data.cancel_expiry is not None:
+        runtime_data.cancel_expiry()
+
+    interval_seconds = max(1, min(_options_from_entry(entry).expire_after, 30))
+
+    def check_expiry(now: Any) -> None:
+        runtime_data.registry.check_expiry(
+            on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key)
+        )
+
+    runtime_data.cancel_expiry = async_track_time_interval(hass, check_expiry, timedelta(seconds=interval_seconds))
+
+
+def _dispatch_metric_updated(hass: HomeAssistant, entry: ConfigEntry, unique_key: str) -> None:
+    """Dispatch a registry update signal for one metric."""
+    if async_dispatcher_send is not None:
+        async_dispatcher_send(
+            hass,
+            SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
+            unique_key,
+        )

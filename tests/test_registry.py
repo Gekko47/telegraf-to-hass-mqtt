@@ -88,6 +88,33 @@ def test_registry_exclude_patterns_and_field_overrides() -> None:
     assert state.descriptor.suggested_state_class == "measurement"
 
 
+def test_registry_apply_options_live() -> None:
+    registry = MetricRegistry(expire_after=5)
+    registry.apply_options(
+        expire_after=1,
+        exclude_patterns=("mem_*",),
+        field_overrides={"used_percent": {"native_unit": "%", "state_class": "measurement"}},
+    )
+
+    descriptor = MetricDescriptor(
+        unique_key="mem_used_percent",
+        measurement="mem",
+        tags={"host": "host1"},
+        field="used_percent",
+        value=41.2,
+        timestamp=1721664000,
+        name="Memory Used Percent",
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
+    )
+
+    assert registry.update(descriptor) is False
+    assert registry.get("mem_used_percent") is None
+    assert registry._expire_after == 1
+
+
 def test_registry_only_writes_state_on_real_change() -> None:
     calls: list[tuple[bool, bool]] = []
     registry = MetricRegistry(expire_after=5)

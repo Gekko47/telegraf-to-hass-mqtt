@@ -14,6 +14,7 @@ from .models import MetricDescriptor
 class MetricState:
     """Current state stored for a descriptor key."""
 
+    raw_descriptor: MetricDescriptor
     descriptor: MetricDescriptor
     last_updated: float
     is_available: bool = True
@@ -40,6 +41,36 @@ class MetricRegistry:
         self._exclude_patterns = exclude_patterns
         self._field_overrides = field_overrides or {}
         self._states: dict[str, MetricState] = {}
+
+    def apply_options(
+        self,
+        *,
+        expire_after: int | None = None,
+        exclude_patterns: tuple[str, ...] | None = None,
+        field_overrides: dict[str, dict[str, Any]] | None = None,
+        on_write: Callable[[str, bool, Any], None] | None = None,
+    ) -> None:
+        """Apply live configuration options without rebuilding the registry."""
+        if expire_after is not None:
+            self._expire_after = expire_after
+        if exclude_patterns is not None:
+            self._exclude_patterns = exclude_patterns
+            for unique_key, state in self._states.items():
+                if not self._matches_exclude(unique_key):
+                    continue
+                if state.is_available:
+                    state.is_available = False
+                    if on_write is not None:
+                        on_write(unique_key, False, state.value)
+        if field_overrides is not None:
+            self._field_overrides = field_overrides
+            for unique_key, state in self._states.items():
+                descriptor = self._apply_overrides(state.raw_descriptor)
+                if descriptor == state.descriptor:
+                    continue
+                state.descriptor = descriptor
+                if on_write is not None:
+                    on_write(unique_key, state.is_available, state.value)
 
     def get(self, unique_key: str) -> MetricState | None:
         """Return the current state for a key if one already exists."""
@@ -79,15 +110,17 @@ class MetricRegistry:
         on_discovered: Callable[[str], None] | None = None,
     ) -> bool:
         """Store a descriptor and emit state updates only when value or availability changes."""
-        descriptor = self._apply_overrides(descriptor)
-        if self._matches_exclude(descriptor.unique_key):
+        raw_descriptor = descriptor
+        descriptor = self._apply_overrides(raw_descriptor)
+        if self._matches_exclude(raw_descriptor.unique_key):
             return False
 
-        current = self._states.get(descriptor.unique_key)
+        current = self._states.get(raw_descriptor.unique_key)
         current_time = self._clock()
 
         if current is None:
-            self._states[descriptor.unique_key] = MetricState(
+            self._states[raw_descriptor.unique_key] = MetricState(
+                raw_descriptor=raw_descriptor,
                 descriptor=descriptor,
                 last_updated=current_time,
                 is_available=True,
@@ -102,6 +135,7 @@ class MetricRegistry:
         changed = current.value != descriptor.value or prior_available is False
         if changed:
             self._states[descriptor.unique_key] = MetricState(
+                raw_descriptor=raw_descriptor,
                 descriptor=descriptor,
                 last_updated=current_time,
                 is_available=True,
@@ -110,6 +144,7 @@ class MetricRegistry:
                 on_write(descriptor.unique_key, True, descriptor.value)
             return True
 
+        current.raw_descriptor = raw_descriptor
         current.descriptor = descriptor
         current.last_updated = current_time
         return False
