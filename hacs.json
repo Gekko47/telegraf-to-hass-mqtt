@@ -1,5 +1,5 @@
 {
-  "name": "telegraf_mqtt",
+  "name": "Telegraf MQTT",
   "content_in_root": false,
   "homeassistant": "2025.1.0"
 }

@@ -227,6 +227,29 @@ def test_manifest_and_translations_are_release_ready() -> None:
     assert translations["config"]["step"]["options"]["title"] == "Configure options"
 
 
+def test_hacs_packaging_metadata_is_release_ready() -> None:
+    hacs_path = Path("hacs.json")
+    manifest_path = Path("custom_components/telegraf_mqtt/manifest.json")
+
+    hacs = json.loads(hacs_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert hacs["name"] == "Telegraf MQTT"
+    assert hacs["homeassistant"] == "2025.1.0"
+    assert hacs["content_in_root"] is False
+    assert manifest["version"] != "0.0.0"
+
+
+def test_readme_documents_install_and_configuration() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "HACS" in readme
+    assert "MQTT" in readme
+    assert "telegraf_mqtt" in readme
+    assert "Install" in readme
+    assert "Configure" in readme
+
+
 def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:
     _install_fake_homeassistant(monkeypatch)
 
