@@ -132,6 +132,51 @@ def test_measurement_specific_naming_and_profile_categories() -> None:
     assert disk_descriptors[0].entity_category == "diagnostic"
 
 
+def test_name_resolution_excludes_host_leakage_and_resolves_field_aliases() -> None:
+    parser = TelegrafParser()
+
+    cpu_descriptors = parser.parse(
+        json.dumps(
+            {
+                "name": "cpu",
+                "tags": {"host": "cachyos-gekko"},
+                "fields": {"usage_idle": 88.4},
+                "timestamp": 1721664000,
+            }
+        )
+    )
+    mem_descriptors = parser.parse(
+        json.dumps(
+            {
+                "name": "mem",
+                "tags": {"host": "cachyos-gekko"},
+                "fields": {"used_percent": 41.2, "used": 8589934592},
+                "timestamp": 1721664000,
+            }
+        )
+    )
+
+    assert [descriptor.name for descriptor in cpu_descriptors] == ["Usage Idle"]
+    assert [descriptor.name for descriptor in mem_descriptors] == ["Used Percent", "Used"]
+
+
+def test_name_resolution_normalizes_tag_value_whitespace_and_case_for_alias_lookup() -> None:
+    parser = TelegrafParser()
+
+    cpu_descriptors = parser.parse(
+        json.dumps(
+            {
+                "name": "cpu",
+                "tags": {"host": "cachyos-gekko", "cpu": " CPU-total "},
+                "fields": {"usage_idle": 88.4},
+                "timestamp": 1721664000,
+            }
+        )
+    )
+
+    assert [descriptor.name for descriptor in cpu_descriptors] == ["CPU Total Usage Idle"]
+
+
 def test_parser_drops_invalid_json_and_unsupported_field_shapes() -> None:
     parser = TelegrafParser()
 

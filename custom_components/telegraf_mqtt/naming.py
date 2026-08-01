@@ -23,15 +23,23 @@ def resolve_name(measurement: str, tags: Mapping[str, str], field: str) -> str:
         if path == "/":
             return f"Disk Root {_titleize(FIELD_ALIASES.get(field, field))}"
 
-    tag_bits = [TAG_ALIASES.get(str(value), value) for value in tags.values() if value not in {"host"}]
+    tag_bits = []
+    for key, value in sorted(tag_map.items()):
+        if key == "host":
+            continue
+        normalized_value = str(value).strip().lower()
+        if not normalized_value:
+            continue
+        token = TAG_ALIASES.get(normalized_value, normalized_value)
+        if token not in tag_bits:
+            tag_bits.append(token)
+
     field_bit = FIELD_ALIASES.get(field, field)
 
     parts: list[str] = []
-    for token in tag_bits:
-        if token not in parts:
-            parts.append(token)
+    parts.extend(tag_bits)
     parts.append(field_bit)
-    return " ".join(_titleize(part) for part in parts if part)
+    return " ".join(_format_part(part) for part in parts if part)
 
 
 def resolve_entity_category(measurement: str, field: str) -> str | None:
@@ -48,3 +56,10 @@ def resolve_entity_category(measurement: str, field: str) -> str | None:
 
 def _titleize(value: str) -> str:
     return " ".join(word.capitalize() for word in value.replace("_", " ").split() if word)
+
+
+def _format_part(value: str) -> str:
+    """Preserve explicit alias display labels while title-casing raw token values."""
+    if value in TAG_ALIASES.values():
+        return value
+    return _titleize(value)
