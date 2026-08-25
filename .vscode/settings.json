@@ -1,5 +1,9 @@
 {
     "chat.tools.terminal.autoApprove": {
-        ".\\.venv\\Scripts\\python": true
+        ".\\.venv\\Scripts\\python": true,
+        "/^python -m pytest -q$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }

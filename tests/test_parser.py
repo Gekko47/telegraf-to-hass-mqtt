@@ -7,7 +7,6 @@ from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
 
-
 REFERENCE_PAYLOADS = [
     {"name": "cpu", "tags": {"host": "cachyos-gekko"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
     {
@@ -52,11 +51,7 @@ REFERENCE_PAYLOADS = [
 def test_all_reference_payloads_produce_descriptors() -> None:
     parser = TelegrafParser()
 
-    descriptors = [
-        descriptor
-        for payload in REFERENCE_PAYLOADS
-        for descriptor in parser.parse(json.dumps(payload))
-    ]
+    descriptors = [descriptor for payload in REFERENCE_PAYLOADS for descriptor in parser.parse(json.dumps(payload))]
 
     assert len(descriptors) == 13
     assert all(isinstance(descriptor, MetricDescriptor) for descriptor in descriptors)

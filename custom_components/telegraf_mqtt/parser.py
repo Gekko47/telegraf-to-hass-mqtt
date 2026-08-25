@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import ClassVar
 
 from .models import MetricDescriptor
 from .parsers import (
@@ -23,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 class TelegrafParser:
     """Parse raw Telegraf MQTT JSON payloads into metric descriptors."""
 
-    _PARSERS = {
+    _PARSERS: ClassVar[dict] = {
         "battery": parse_battery_payload,
         "cpu": parse_cpu_payload,
         "disk": parse_disk_payload,
@@ -37,7 +38,7 @@ class TelegrafParser:
         """Parse a raw MQTT payload."""
         try:
             decoded = json.loads(payload)
-        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        except TypeError, UnicodeDecodeError, json.JSONDecodeError:
             _LOGGER.debug("Invalid Telegraf JSON payload")
             return []
 

@@ -31,10 +31,16 @@ async def async_get_config_entry_diagnostics(
     runtime_data = getattr(entry, "runtime_data", None)
     if runtime_data is not None:
         data["runtime"] = {
-            "device_name": runtime_data.device_name,
-            "device_id": runtime_data.device_id,
             "manufacturer": runtime_data.manufacturer,
             "model": runtime_data.model,
+            "devices": {
+                device_id: {
+                    "device_name": registry.device_name,
+                    "metrics": len(registry),
+                    "last_any_metric_age_seconds": max(0.0, runtime_data.manager._clock() - registry.last_any_metric),
+                }
+                for device_id, registry in runtime_data.manager.devices.items()
+            },
         }
 
     return data

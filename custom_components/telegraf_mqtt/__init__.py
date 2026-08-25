@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any
 
 try:
     from homeassistant.components import mqtt
@@ -23,18 +24,17 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test im
     async_track_time_interval = None
 
 from .const import (
-    CONF_DEVICE_NAME,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
     CONF_TOPIC_PATTERN,
     DEFAULT_EXPIRE_AFTER,
-    DOMAIN,
     SIGNAL_METRIC_UPDATED,
+    SIGNAL_NEW_DEVICE,
     SIGNAL_NEW_METRIC,
 )
 from .parser import TelegrafParser
-from .registry import MetricRegistry
+from .registry import DeviceManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,12 +45,10 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR] if Platform is not None el
 class TelegrafMqttRuntimeData:
     """Runtime state for a config entry."""
 
-    device_name: str
-    device_id: str
+    manager: DeviceManager
+    parser: TelegrafParser
     manufacturer: str | None
     model: str | None
-    registry: MetricRegistry
-    parser: TelegrafParser
     unsubscribe: Callable[[], None] | None = None
     cancel_expiry: Callable[[], None] | None = None
 
@@ -58,20 +56,18 @@ class TelegrafMqttRuntimeData:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up telegraf_mqtt from a config entry."""
     options = _options_from_entry(entry)
-    registry = MetricRegistry(
+    parser = TelegrafParser()
+    manager = DeviceManager(
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
         field_overrides=options.field_overrides,
+        parser=parser,
     )
-    parser = TelegrafParser()
-    device_name = entry.data[CONF_DEVICE_NAME]
     entry.runtime_data = TelegrafMqttRuntimeData(
-        device_name=device_name,
-        device_id=entry.entry_id,
+        manager=manager,
+        parser=parser,
         manufacturer=entry.data.get("manufacturer"),
         model=entry.data.get("model"),
-        registry=registry,
-        parser=parser,
     )
 
     if Platform is not None:
@@ -80,21 +76,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mqtt is not None:
         topic_pattern = entry.data[CONF_TOPIC_PATTERN]
 
+        manager.set_callbacks(
+            on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key),
+            on_discovered=lambda metric_key: _dispatch_new_metric(hass, entry, metric_key),
+            on_new_device=_make_new_device_callback(hass, entry),
+        )
+
         async def message_received(message: Any) -> None:
-            for descriptor in parser.parse(message.payload):
-                registry.update(
-                    descriptor,
-                    on_discovered=lambda unique_key: async_dispatcher_send(
-                        hass,
-                        SIGNAL_NEW_METRIC.format(entry_id=entry.entry_id),
-                        unique_key,
-                    ),
-                    on_write=lambda unique_key, available, value: async_dispatcher_send(
-                        hass,
-                        SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
-                        unique_key,
-                    ),
-                )
+            manager.process_message(message.topic, message.payload)
 
         entry.runtime_data.unsubscribe = await mqtt.async_subscribe(hass, topic_pattern, message_received)
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
@@ -135,7 +124,7 @@ class TelegrafMqttOptions:
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply options live without reloading the config entry."""
     options = _options_from_entry(entry)
-    entry.runtime_data.registry.apply_options(
+    entry.runtime_data.manager.apply_options(
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
         field_overrides=options.field_overrides,
@@ -166,8 +155,8 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
     interval_seconds = max(1, min(_options_from_entry(entry).expire_after, 30))
 
     def check_expiry(now: Any) -> None:
-        runtime_data.registry.check_expiry(
-            on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key)
+        runtime_data.manager.check_expiry(
+            on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
         )
 
     runtime_data.cancel_expiry = async_track_time_interval(hass, check_expiry, timedelta(seconds=interval_seconds))
@@ -181,3 +170,29 @@ def _dispatch_metric_updated(hass: HomeAssistant, entry: ConfigEntry, unique_key
             SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
             unique_key,
         )
+
+
+def _dispatch_new_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key: str) -> None:
+    """Dispatch the new-metric signal so platforms add an entity for it."""
+    if async_dispatcher_send is not None:
+        async_dispatcher_send(
+            hass,
+            SIGNAL_NEW_METRIC.format(entry_id=entry.entry_id),
+            metric_key,
+        )
+
+
+def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry):
+    """Build the device-discovery callback that announces a newly seen host."""
+
+    def on_new_device(device_id: str, device_name: str) -> None:
+        _LOGGER.info("Discovered new Telegraf device %s (%s)", device_name, device_id)
+        if async_dispatcher_send is not None:
+            async_dispatcher_send(
+                hass,
+                SIGNAL_NEW_DEVICE.format(entry_id=entry.entry_id),
+                device_id,
+                device_name,
+            )
+
+    return on_new_device

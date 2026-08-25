@@ -121,16 +121,19 @@ The repository uses a local pytest-based regression suite.
 
 ## Roadmap alignment
 
-The repo is organized around a phased roadmap:
+The repo is organized around a phased roadmap (see `.cline/ROADMAP.md`):
 
-- Phase 0: scaffold and package layout
-- Phase 1: generic parser baseline
-- Phase 2: registry and live option behavior
+- Phase 0: scaffolding, packaging metadata, CI, and the HA 2026.6.x platform floor
+- Phase 1: multi-device core pipeline (one Home Assistant device per Telegraf host)
+- Phase 2: options and availability behavior
 - Phase 3: measurement-aware naming and metadata resolution
-- Phase 4: boolean routing to binary sensor entities
-- Phase 5: integration metadata and translation polish
-- Phase 6: release packaging metadata
-- Phase 7: repository hand-off and documentation readiness
+- Phase 4: units, statistics, and binary sensor projection
+- Phase 5: 🥉 Bronze quality-scale gate
+- Phase 6: intelligent cleanup and device lifecycle
+- Phase 7: diagnostics and repairs
+- Phase 8: 🥈 Silver gate (reliability hardening)
+- Phase 9: 🥇 Gold gate (translations, icons, docs depth)
+- Phase 10: 🏆 Platinum gate (strict typing) and HACS release
 
 ## License
 

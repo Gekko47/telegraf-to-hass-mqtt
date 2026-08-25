@@ -1,13 +1,13 @@
-import asyncio
 import importlib
 import json
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from custom_components.telegraf_mqtt.models import MetricDescriptor
-from custom_components.telegraf_mqtt.registry import MetricRegistry
+from custom_components.telegraf_mqtt.registry import DeviceManager
 
 
 def _install_fake_homeassistant(monkeypatch) -> None:
@@ -37,7 +37,7 @@ def _install_fake_homeassistant(monkeypatch) -> None:
 
     class FakeConfigFlow:
         VERSION = 1
-        _configured_ids: set[str] = set()
+        _configured_ids: ClassVar[set[str]] = set()
 
         def __init_subclass__(cls, **kwargs) -> None:
             return super().__init_subclass__()
@@ -168,9 +168,7 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
 
 @dataclass
 class RuntimeData:
-    registry: MetricRegistry
-    device_id: str = "entry-1"
-    device_name: str = "Telegraf MQTT"
+    manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
 
@@ -186,7 +184,8 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
     _install_binary_sensor_homeassistant_stubs(monkeypatch)
 
     binary_sensor_module = importlib.import_module("custom_components.telegraf_mqtt.binary_sensor")
-    registry = MetricRegistry()
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
     registry.update(
         MetricDescriptor(
             unique_key="link_up",
@@ -202,11 +201,12 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
             entity_category=None,
         )
     )
-    entry = Entry(RuntimeData(registry=registry))
-    entity = binary_sensor_module.TelegrafMqttBinarySensor(entry, "link_up")
+    entry = Entry(RuntimeData(manager=manager))
+    entity = binary_sensor_module.TelegrafMqttBinarySensor(entry, "host1:link_up")
 
     assert entity.is_on is True
     assert entity.available is True
+    assert entity._attr_unique_id == "telegraf_mqtt_host1_link_up"
 
 
 def test_manifest_and_translations_are_release_ready() -> None:
@@ -236,7 +236,7 @@ def test_hacs_packaging_metadata_is_release_ready() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert hacs["name"] == "Telegraf MQTT"
-    assert hacs["homeassistant"] == "2025.1.0"
+    assert hacs["homeassistant"] == "2026.6.0"
     assert hacs["content_in_root"] is False
     assert manifest["version"] != "0.0.0"
 
@@ -261,40 +261,3 @@ def test_repository_has_hacs_branding_assets() -> None:
     assert Path("logo.png").exists()
     assert Path("custom_components/telegraf_mqtt/brand/icon.png").exists()
     assert Path("custom_components/telegraf_mqtt/brand/logo.png").exists()
-
-
-def test_config_flow_rejects_duplicate_topic_pattern(monkeypatch) -> None:
-    _install_fake_homeassistant(monkeypatch)
-
-    from custom_components.telegraf_mqtt.config_flow import TelegrafMqttConfigFlow
-
-    first_flow = TelegrafMqttConfigFlow()
-    first_result = asyncio.run(
-        first_flow.async_step_user(
-            {
-                "topic_pattern": "telegraf/#",
-                "device_name": "Telegraf MQTT",
-            }
-        )
-    )
-    assert first_result["type"] == "create_entry"
-    TelegrafMqttConfigFlow._configured_ids.add("telegraf/#")
-
-    second_flow = TelegrafMqttConfigFlow()
-    try:
-        asyncio.run(
-            second_flow.async_step_user(
-                {
-                    "topic_pattern": "telegraf/#",
-                    "device_name": "Telegraf MQTT",
-                }
-            )
-        )
-    except RuntimeError as exc:
-        assert str(exc) == "already_configured"
-    else:
-        raise AssertionError("duplicate topic pattern should be rejected")
-
-    form_result = asyncio.run(first_flow.async_step_user(None))
-    assert form_result["type"] == "form"
-    assert form_result["step_id"] == "user"

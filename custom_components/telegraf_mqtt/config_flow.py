@@ -46,9 +46,6 @@ def _default_device_name(topic: str) -> str:
 class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
     """Handle telegraf_mqtt options changes."""
 
-    def __init__(self, config_entry: Any) -> None:
-        self.config_entry = config_entry
-
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show a minimal options form for the registry controls."""
         if user_input is not None:
@@ -75,7 +72,8 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: Any) -> TelegrafMqttOptionsFlow:
         """Return the options flow handler for an existing entry."""
-        return TelegrafMqttOptionsFlow(config_entry)
+        # The flow manager injects ``config_entry`` on the handler itself.
+        return TelegrafMqttOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the initial step."""

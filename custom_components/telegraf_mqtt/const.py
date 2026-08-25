@@ -10,5 +10,6 @@ DEFAULT_TOPIC_PATTERN = "telegraf/#"
 DEFAULT_DEVICE_NAME = "Telegraf MQTT"
 DEFAULT_EXPIRE_AFTER = 120
 
+SIGNAL_NEW_DEVICE = f"{DOMAIN}_new_device_{{entry_id}}"
 SIGNAL_NEW_METRIC = f"{DOMAIN}_new_metric_{{entry_id}}"
 SIGNAL_METRIC_UPDATED = f"{DOMAIN}_metric_updated_{{entry_id}}"

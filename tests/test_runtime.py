@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
@@ -60,7 +61,9 @@ class FakeMqtt:
         self.topic_pattern: str | None = None
         self.message_callback: Callable[[Any], Any] | None = None
 
-    async def async_subscribe(self, hass: FakeHass, topic_pattern: str, callback: Callable[[Any], Any]) -> Callable[[], None]:
+    async def async_subscribe(
+        self, hass: FakeHass, topic_pattern: str, callback: Callable[[Any], Any]
+    ) -> Callable[[], None]:
         self.topic_pattern = topic_pattern
         self.message_callback = callback
         return self.unsubscribe
@@ -128,7 +131,8 @@ def test_setup_applies_options_and_schedules_expiry(monkeypatch) -> None:
     assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
 
     assert fake_mqtt.topic_pattern == "telegraf/#"
-    assert entry.runtime_data.registry.update(_descriptor()) is False
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    assert registry.update(_descriptor()) is False
     assert entry.runtime_data.cancel_expiry is not None
     assert entry.update_listener is not None
 
@@ -139,15 +143,14 @@ def test_expiry_dispatches_metric_update(monkeypatch) -> None:
     entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 1})
 
     asyncio.run(integration.async_setup_entry(hass, entry))
-    entry.runtime_data.registry.update(_descriptor())
-    entry.runtime_data.registry.get("mem_used_percent").last_updated = 0.0
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor())
+    registry.get("mem_used_percent").last_updated = 0.0
 
     hass.expiry_callback(None)
 
-    assert entry.runtime_data.registry.get("mem_used_percent").is_available is False
-    assert dispatched == [
-        (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "mem_used_percent")
-    ]
+    assert registry.get("mem_used_percent").is_available is False
+    assert dispatched == [(SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "mem_used_percent")]
 
 
 def test_options_update_applies_live_without_reload(monkeypatch) -> None:
@@ -156,7 +159,8 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
     entry = FakeConfigEntry()
 
     asyncio.run(integration.async_setup_entry(hass, entry))
-    entry.runtime_data.registry.update(_descriptor())
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor())
 
     entry.options = {
         CONF_EXCLUDE_PATTERNS: ["mem_*"],
@@ -165,10 +169,30 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
     }
     asyncio.run(entry.update_listener(hass, entry))
 
-    state = entry.runtime_data.registry.get("mem_used_percent")
+    state = registry.get("mem_used_percent")
     assert state.is_available is False
     assert state.descriptor.native_unit == "%"
     assert dispatched[-1] == (
         SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
         "mem_used_percent",
     )
+
+
+def test_unload_entry_succeeds_without_platform_support(monkeypatch) -> None:
+    """Import-isolation guard: unload short-circuits when HA platforms are absent."""
+    monkeypatch.setattr(integration, "Platform", None)
+    entry = FakeConfigEntry()
+    entry.runtime_data = integration.TelegrafMqttRuntimeData(manager=None, parser=None, manufacturer=None, model=None)
+
+    assert asyncio.run(integration.async_unload_entry(FakeHass(), entry)) is True
+
+
+def test_schedule_expiry_check_is_a_noop_without_time_tracking(monkeypatch) -> None:
+    """Import-isolation guard: no periodic task when async_track_time_interval is absent."""
+    monkeypatch.setattr(integration, "async_track_time_interval", None)
+    hass = FakeHass()
+    entry = FakeConfigEntry()
+
+    integration._schedule_expiry_check(hass, entry)
+
+    assert not hasattr(hass, "expiry_callback")

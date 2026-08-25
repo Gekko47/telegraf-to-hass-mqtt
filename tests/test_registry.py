@@ -1,5 +1,12 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
 from custom_components.telegraf_mqtt.models import MetricDescriptor
-from custom_components.telegraf_mqtt.registry import MetricRegistry
+from custom_components.telegraf_mqtt.parser import TelegrafParser
+from custom_components.telegraf_mqtt.registry import DeviceManager, MetricRegistry
 
 
 def test_registry_expiry_and_recovery() -> None:
@@ -178,7 +185,11 @@ def test_registry_discovers_once_and_does_not_write_for_timestamp_only_changes()
         entity_category=None,
     )
 
-    assert registry.update(descriptor, on_write=lambda key, available, value: writes.append(key), on_discovered=discovered.append)
+    assert registry.update(
+        descriptor,
+        on_write=lambda key, available, value: writes.append(key),
+        on_discovered=discovered.append,
+    )
     assert not registry.update(
         MetricDescriptor(
             unique_key="cpu_usage_idle",
@@ -199,3 +210,224 @@ def test_registry_discovers_once_and_does_not_write_for_timestamp_only_changes()
 
     assert writes == ["cpu_usage_idle"]
     assert discovered == ["cpu_usage_idle"]
+
+
+class _FakeParser:
+    def __init__(self, descriptors: list[MetricDescriptor]) -> None:
+        self._descriptors = descriptors
+
+    def parse(self, payload: str | bytes) -> list[MetricDescriptor]:
+        return list(self._descriptors)
+
+
+def test_device_manager_discovers_multiple_devices_and_isolates_metrics() -> None:
+    manager = DeviceManager(expire_after=5, clock=lambda: 100.0)
+    parser = _FakeParser(
+        [
+            MetricDescriptor(
+                unique_key="cpu_usage_idle",
+                measurement="cpu",
+                tags={"host": "server01", "cpu": "cpu-total"},
+                field="usage_idle",
+                value=88.4,
+                timestamp=1721664000,
+                name="CPU Usage Idle",
+                native_unit=None,
+                suggested_device_class=None,
+                suggested_state_class="measurement",
+                entity_category=None,
+            ),
+            MetricDescriptor(
+                unique_key="mem_used_percent",
+                measurement="mem",
+                tags={"host": "server02"},
+                field="used_percent",
+                value=41.2,
+                timestamp=1721664000,
+                name="Memory Used Percent",
+                native_unit=None,
+                suggested_device_class=None,
+                suggested_state_class="measurement",
+                entity_category=None,
+            ),
+        ]
+    )
+
+    manager.process_message("telegraf/server01", "{}", parser=parser)
+    manager.process_message("telegraf/server02", "{}", parser=parser)
+
+    assert set(manager.devices) == {"server01", "server02"}
+    assert manager.keys() == (
+        "server01:cpu_usage_idle",
+        "server02:mem_used_percent",
+    )
+
+
+def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_stale_metric() -> None:
+    clock = [100.0]
+    manager = DeviceManager(expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0])
+    active_registry = manager.get_or_create_registry("server01", "server01")
+    active_registry.update(
+        MetricDescriptor(
+            unique_key="cpu_usage_idle",
+            measurement="cpu",
+            tags={"host": "server01", "cpu": "cpu-total"},
+            field="usage_idle",
+            value=88.4,
+            timestamp=1721664000,
+            name="CPU Usage Idle",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
+        )
+    )
+    clock[0] = 107.0
+    active_registry.last_any_metric = 107.0
+    stale = active_registry.get("cpu_usage_idle")
+    stale.last_updated = 100.0
+
+    offline_registry = manager.get_or_create_registry("server02", "server02")
+    offline_registry.last_any_metric = 100.0
+    offline_registry.update(
+        MetricDescriptor(
+            unique_key="mem_used_percent",
+            measurement="mem",
+            tags={"host": "server02"},
+            field="used_percent",
+            value=41.2,
+            timestamp=1721664000,
+            name="Memory Used Percent",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
+        )
+    )
+    offline_registry.get("mem_used_percent").last_updated = 100.0
+
+    removed = manager.cleanup()
+
+    assert removed == ["server01:cpu_usage_idle"]
+    assert manager.get_metric("server01:cpu_usage_idle") is None
+    assert manager.get_metric("server02:mem_used_percent") is not None
+
+
+# --- helpers for the tests below -------------------------------------------
+
+
+def _descriptor(
+    unique_key: str,
+    *,
+    field: str | None = None,
+    cleanup_policy: str = "AUTO",
+) -> MetricDescriptor:
+    return MetricDescriptor(
+        unique_key=unique_key,
+        measurement="m",
+        tags={"host": "h"},
+        field=field or unique_key,
+        value=1,
+        timestamp=1,
+        name=unique_key,
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class=None,
+        entity_category=None,
+        cleanup_policy=cleanup_policy,
+    )
+
+
+def test_cleanup_enforces_never_and_always_policies() -> None:
+    clock = [0.0]
+    registry = MetricRegistry(expire_after=10, cleanup_delay=5, clock=lambda: clock[0])
+    registry.update(_descriptor("always_go", cleanup_policy="ALWAYS"))
+    registry.update(_descriptor("never_go", cleanup_policy="NEVER"))
+    registry.update(_descriptor("auto_go", cleanup_policy="AUTO"))
+    assert len(registry) == 3
+
+    clock[0] = 100.0
+    removed = registry.cleanup()
+
+    assert removed == ["always_go", "auto_go"]
+    assert registry.get("never_go") is not None
+    assert len(registry) == 1
+
+
+def test_check_expiry_leaves_fresh_metrics_available() -> None:
+    clock = [100.0]
+    registry = MetricRegistry(expire_after=10, clock=lambda: clock[0])
+    registry.update(_descriptor("fresh"))
+    clock[0] = 105.0
+
+    registry.check_expiry()
+
+    assert registry.get("fresh").is_available is True
+
+
+def test_apply_options_only_touches_affected_metrics() -> None:
+    writes: list[tuple[str, bool]] = []
+    registry = MetricRegistry(expire_after=10)
+    registry.update(_descriptor("temp_input"))
+    registry.update(_descriptor("usage_idle"))
+
+    # Exclusion loop: only the matching metric flips unavailable.
+    registry.apply_options(
+        exclude_patterns=("temp_*",),
+        on_write=lambda key, available, value: writes.append((key, available)),
+    )
+    assert writes == [("temp_input", False)]
+    assert registry.get("usage_idle").is_available is True
+
+    # Override loop: only metrics whose descriptor actually changed emit a write.
+    writes.clear()
+    registry.apply_options(
+        field_overrides={"usage_idle": {"native_unit": "%"}},
+        on_write=lambda key, available, value: writes.append((key, available)),
+    )
+    assert writes == [("usage_idle", True)]
+    assert registry.get("usage_idle").descriptor.native_unit == "%"
+
+
+def test_device_manager_get_scans_registries_and_reports_misses() -> None:
+    manager = DeviceManager()
+    manager.get_or_create_registry("a", "A").update(_descriptor("k1"))
+    manager.get_or_create_registry("b", "B").update(_descriptor("k2"))
+
+    assert manager.get("k1").device_id == "a"
+    assert manager.get("k2").device_id == "b"
+    assert manager.get("missing") is None
+    assert len(manager) == 2
+
+
+def test_get_metric_handles_legacy_and_unknown_keys() -> None:
+    manager = DeviceManager()
+    manager.get_or_create_registry("a", "A").update(_descriptor("k1"))
+
+    assert manager.get_metric("k1") is not None  # legacy colon-less key
+    assert manager.get_metric("zz:k1") is None  # unknown device id
+    assert manager.get_metric("zz:nope") is None
+
+
+def test_process_message_requires_a_parser() -> None:
+    with pytest.raises(ValueError, match="parser is required"):
+        DeviceManager().process_message("topic", "{}")
+
+
+def test_set_parser_persists_for_subsequent_messages() -> None:
+    manager = DeviceManager()
+    manager.set_parser(TelegrafParser())
+
+    manager.process_message(
+        "telegraf/data",
+        json.dumps(
+            {
+                "name": "mem",
+                "tags": {"host": "h1"},
+                "fields": {"used_percent": 41.2},
+                "timestamp": 1700000000,
+            }
+        ),
+    )
+
+    assert manager.get_metric("h1:mem_used_percent") is not None

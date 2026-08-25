@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, TypeAlias
 
-MetricValue: TypeAlias = int | float | str | bool
+type MetricValue = int | float | str | bool
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,8 @@ class MetricDescriptor:
     suggested_device_class: str | None
     suggested_state_class: str | None
     entity_category: str | None
+    cleanup_policy: str = "AUTO"
+    device_id: str = ""
 
 
 def frozen_tags(tags: Mapping[str, str]) -> Mapping[str, str]:

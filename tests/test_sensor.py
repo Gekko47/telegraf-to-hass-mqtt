@@ -6,7 +6,7 @@ import types
 from dataclasses import dataclass
 
 from custom_components.telegraf_mqtt.models import MetricDescriptor
-from custom_components.telegraf_mqtt.registry import MetricRegistry
+from custom_components.telegraf_mqtt.registry import DeviceManager
 
 
 def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
@@ -64,9 +64,7 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
 
 @dataclass
 class RuntimeData:
-    registry: MetricRegistry
-    device_id: str = "entry-1"
-    device_name: str = "Telegraf MQTT"
+    manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
 
@@ -95,21 +93,32 @@ def _descriptor() -> MetricDescriptor:
 
 def test_sensor_availability_and_live_override_refresh(monkeypatch) -> None:
     _install_sensor_homeassistant_stubs(monkeypatch)
-    sensor_module = importlib.import_module("custom_components.telegraf_mqtt.sensor")
+    # The real harness imports this module under real HA earlier in the suite;
+    # drop the cache so the stub-bound version is imported, then drop it again
+    # so later tests re-import against whatever environment they provide.
+    sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
+    try:
+        _run_sensor_assertions(importlib.import_module("custom_components.telegraf_mqtt.sensor"))
+    finally:
+        sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
 
-    registry = MetricRegistry()
+
+def _run_sensor_assertions(sensor_module) -> None:
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
     registry.update(_descriptor())
-    entry = Entry(RuntimeData(registry=registry))
-    entity = sensor_module.TelegrafMqttSensor(entry, "mem_used_percent")
+    entry = Entry(RuntimeData(manager=manager))
+    entity = sensor_module.TelegrafMqttSensor(entry, "host1:mem_used_percent")
 
     assert entity.available is True
     assert entity.native_value == 41.2
+    assert entity._attr_unique_id == "telegraf_mqtt_host1_mem_used_percent"
 
-    registry.apply_options(
+    manager.apply_options(
         exclude_patterns=("mem_*",),
         field_overrides={"used_percent": {"native_unit": "%"}},
     )
-    entity._handle_metric_updated("mem_used_percent")
+    entity._handle_metric_updated("host1:mem_used_percent")
 
     assert entity.available is False
     assert entity.native_value == 41.2

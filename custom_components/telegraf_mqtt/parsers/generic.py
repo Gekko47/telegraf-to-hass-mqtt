@@ -30,7 +30,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
 
     try:
         timestamp_float = float(timestamp)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         _LOGGER.debug("Unsupported Telegraf payload shape")
         return []
 
@@ -58,6 +58,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 suggested_device_class=infer_device_class(measurement, field),
                 suggested_state_class=infer_state_class(field, value),
                 entity_category=resolve_entity_category(measurement, field),
+                device_id=clean_tags.get("host", ""),
             )
         )
 
@@ -77,7 +78,7 @@ def build_fallback_name(measurement: str, tags: Mapping[str, str], field: str) -
     parts = [measurement]
     parts.extend(value for key, value in sorted(tags.items()) if key != "host")
     parts.append(field)
-    return " ".join(_titleize(part) for part in parts if part)
+    return " ".join(titleized for part in parts if part and (titleized := _titleize(part)))
 
 
 def infer_native_unit(field: str) -> str | None:
@@ -122,7 +123,7 @@ def infer_device_class(measurement: str, field: str) -> str | None:
 
 def infer_state_class(field: str, value: MetricValue) -> str | None:
     """Infer a basic suggested state class from field/value shape."""
-    if isinstance(value, bool) or isinstance(value, str):
+    if isinstance(value, (bool, str)):
         return None
     if field in _TOTAL_INCREASING_FIELDS:
         return "total_increasing"
