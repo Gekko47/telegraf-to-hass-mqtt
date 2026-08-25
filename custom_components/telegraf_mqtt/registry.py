@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,9 +17,18 @@ _DEVICE_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _slugify_device(value: str) -> str:
-    """Return a deterministic, stable slug for a device identifier."""
+    """Return a deterministic, stable, collision-resistant device slug.
+
+    Readable text is preserved; when normalization would collapse distinct
+    characters (e.g. ``host-1`` vs ``host_1``), a short digest of the original
+    value is appended so two different identifiers never merge into one slug.
+    """
     slug = _DEVICE_SLUG_RE.sub("_", value.lower()).strip("_")
-    return slug or "unknown"
+    if slug == value:
+        # Normalization was lossless; keep the readable slug unchanged.
+        return slug or "unknown"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"{slug or 'unknown'}_{digest}"
 
 
 @dataclass
@@ -328,12 +338,18 @@ class DeviceManager:
             self._exclude_patterns = exclude_patterns
         if field_overrides is not None:
             self._field_overrides = field_overrides
-        for registry in self.devices.values():
+        for device_id, registry in self.devices.items():
             registry.apply_options(
                 expire_after=expire_after,
                 exclude_patterns=exclude_patterns,
                 field_overrides=field_overrides,
-                on_write=on_write,
+                on_write=(
+                    None
+                    if on_write is None
+                    else lambda key, available, value, _device_id=device_id: self._notify_callback(
+                        f"{_device_id}:{key}", available, value, on_write
+                    )
+                ),
             )
 
     def process_message(
@@ -415,9 +431,15 @@ class DeviceManager:
 
     def check_expiry(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> None:
         """Run expiry checks across every device registry."""
-        for registry in self.devices.values():
+        for device_id, registry in self.devices.items():
             registry.check_expiry(
-                on_write=lambda key, available, value: self._notify_callback(key, available, value, on_write)
+                on_write=(
+                    None
+                    if on_write is None
+                    else lambda key, available, value, _device_id=device_id: self._notify_callback(
+                        f"{_device_id}:{key}", available, value, on_write
+                    )
+                )
             )
 
     def cleanup(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> list[str]:
@@ -432,7 +454,13 @@ class DeviceManager:
             if now - registry.last_any_metric > self._expire_after:
                 continue
             for unique_key in registry.cleanup(
-                on_write=lambda key, available, value: self._notify_callback(key, available, value, on_write)
+                on_write=(
+                    None
+                    if on_write is None
+                    else lambda key, available, value, _device_id=device_id: self._notify_callback(
+                        f"{_device_id}:{key}", available, value, on_write
+                    )
+                )
             ):
                 removed.append(f"{device_id}:{unique_key}")
         return removed

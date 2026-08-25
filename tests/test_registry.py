@@ -306,9 +306,11 @@ def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_sta
     )
     offline_registry.get("mem_used_percent").last_updated = 100.0
 
-    removed = manager.cleanup()
+    writes: list[tuple[str, bool]] = []
+    removed = manager.cleanup(on_write=lambda key, available, value: writes.append((key, available)))
 
     assert removed == ["server01:cpu_usage_idle"]
+    assert writes == [("server01:cpu_usage_idle", False)]
     assert manager.get_metric("server01:cpu_usage_idle") is None
     assert manager.get_metric("server02:mem_used_percent") is not None
 

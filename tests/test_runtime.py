@@ -150,7 +150,7 @@ def test_expiry_dispatches_metric_update(monkeypatch) -> None:
     hass.expiry_callback(None)
 
     assert registry.get("mem_used_percent").is_available is False
-    assert dispatched == [(SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "mem_used_percent")]
+    assert dispatched == [(SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent")]
 
 
 def test_options_update_applies_live_without_reload(monkeypatch) -> None:
@@ -174,7 +174,7 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
     assert state.descriptor.native_unit == "%"
     assert dispatched[-1] == (
         SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
-        "mem_used_percent",
+        "host1:mem_used_percent",
     )
 
 

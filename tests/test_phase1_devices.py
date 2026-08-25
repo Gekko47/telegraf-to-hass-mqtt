@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from custom_components.telegraf_mqtt.parser import TelegrafParser
-from custom_components.telegraf_mqtt.registry import DeviceManager
+from custom_components.telegraf_mqtt.registry import DeviceManager, _slugify_device
 
 _COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "telegraf_mqtt"
 
@@ -61,9 +61,9 @@ def test_manager_routes_descriptors_by_their_own_host() -> None:
 
     manager.process_message("telegraf/data", "{}", parser=_MixedParser())
 
-    assert set(manager.devices) == {"cachyos_gekko", "server02"}
-    assert manager.get_metric("cachyos_gekko:mixed_usage_idle") is None
-    state = manager.get_metric("cachyos_gekko:cpu_cpu_total_usage_idle")
+    assert set(manager.devices) == {"cachyos_gekko_705a925f7d", "server02"}
+    assert manager.get_metric("cachyos_gekko_705a925f7d:mixed_usage_idle") is None
+    state = manager.get_metric("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle")
     assert state is not None and state.value == 88.4
 
 
@@ -79,11 +79,11 @@ def test_manager_slugs_host_into_stable_device_id() -> None:
             on_new_device=lambda device_id, name: discovered.append((device_id, name)),
         )
 
-    assert set(manager.devices) == {"cachyos_gekko"}
-    assert discovered == [("cachyos_gekko", "CachyOS Gekko")]
-    state = manager.get_metric("cachyos_gekko:cpu_cpu_total_usage_idle")
+    assert set(manager.devices) == {"cachyos_gekko_705a925f7d"}
+    assert discovered == [("cachyos_gekko_705a925f7d", "CachyOS Gekko")]
+    state = manager.get_metric("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle")
     assert state is not None
-    assert state.descriptor.device_id == "cachyos_gekko"
+    assert state.descriptor.device_id == "cachyos_gekko_705a925f7d"
     assert state.device_name == "CachyOS Gekko"
 
 
@@ -107,7 +107,7 @@ def test_composite_keys_are_stable_across_reprocessing() -> None:
     manager = DeviceManager()
     for _ in range(3):
         manager.process_message("telegraf/data", CPU_PAYLOAD, parser=TelegrafParser())
-    assert manager.keys() == ("cachyos_gekko:cpu_cpu_total_usage_idle",)
+    assert manager.keys() == ("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle",)
 
 
 def test_parser_layer_never_imports_homeassistant() -> None:
@@ -126,3 +126,17 @@ def test_parser_layer_never_imports_homeassistant() -> None:
                 continue
             for module_name in module_names:
                 assert not module_name.startswith("homeassistant"), f"{path.name} must not import {module_name}"
+
+
+def test_slugify_device_is_collision_resistant() -> None:
+    """Distinct raw identifiers must never collapse onto the same slug."""
+    assert _slugify_device("host-1") != _slugify_device("host_1")
+    assert _slugify_device("Host 1") != _slugify_device("host_1")
+
+
+def test_slugify_device_stays_clean_and_deterministic() -> None:
+    """Lossless identifiers keep their readable slug; output is stable."""
+    assert _slugify_device("server02") == "server02"
+    assert _slugify_device("h1") == "h1"
+    assert _slugify_device("host-1") == _slugify_device("host-1")
+    assert _slugify_device("!!!").startswith("unknown_")

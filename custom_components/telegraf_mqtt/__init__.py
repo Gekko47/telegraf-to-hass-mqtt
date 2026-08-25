@@ -158,6 +158,9 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
         runtime_data.manager.check_expiry(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
         )
+        runtime_data.manager.cleanup(
+            on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
+        )
 
     runtime_data.cancel_expiry = async_track_time_interval(hass, check_expiry, timedelta(seconds=interval_seconds))
 
