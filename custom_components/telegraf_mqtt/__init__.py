@@ -12,13 +12,14 @@ try:
     from homeassistant.components import mqtt
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.const import Platform
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import HomeAssistant, callback
     from homeassistant.helpers.dispatcher import async_dispatcher_send
     from homeassistant.helpers.event import async_track_time_interval
 except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test import isolation
     ConfigEntry = object
     Platform = None
     HomeAssistant = object
+    callback = lambda target: target  # noqa: E731 - identity when HA is absent
     mqtt = None
     async_dispatcher_send = None
     async_track_time_interval = None
@@ -154,6 +155,10 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     interval_seconds = max(1, min(_options_from_entry(entry).expire_after, 30))
 
+    # @callback is REQUIRED here: async_track_time_interval offloads plain
+    # sync functions to executor threads (HassJob), where the dispatcher
+    # send below is a hard error under HA's thread-safety checks.
+    @callback
     def check_expiry(now: Any) -> None:
         runtime_data.manager.check_expiry(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)

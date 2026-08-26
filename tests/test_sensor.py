@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import importlib
 import sys
 import types
@@ -51,6 +52,13 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    entity_helpers = types.ModuleType("homeassistant.helpers.entity")
+
+    class StubEntityCategory(str, enum.Enum):
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    entity_helpers.EntityCategory = StubEntityCategory
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
     monkeypatch.setitem(sys.modules, "homeassistant.components.sensor", sensor)
@@ -60,6 +68,7 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity", entity_helpers)
 
 
 @dataclass

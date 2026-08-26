@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from .heuristics import FIELD_ALIASES, MEASUREMENT_PROFILES, TAG_ALIASES
+from .heuristics import (
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    FIELD_ALIASES,
+    MEASUREMENT_PROFILES,
+    TAG_ALIASES,
+)
+
+# System-metadata fields that are diagnostic rather than user-facing metrics
+# (SPEC.md "Entity categories": uptime, boot_time, process counts, load averages).
+_DIAGNOSTIC_FIELDS: frozenset[str] = frozenset({"uptime", "boot_time"})
+_LOAD_AVERAGE_FIELDS: frozenset[str] = frozenset({"load1", "load5", "load15"})
+_PROCESS_FIELD_PREFIX = "processes_"
 
 
 def resolve_name(measurement: str, tags: Mapping[str, str], field: str) -> str:
@@ -45,12 +56,19 @@ def resolve_name(measurement: str, tags: Mapping[str, str], field: str) -> str:
 def resolve_entity_category(measurement: str, field: str) -> str | None:
     """Resolve the entity category from measurement profile heuristics."""
     profile = MEASUREMENT_PROFILES.get(measurement, {})
-    if profile.get("entity_category") == "diagnostic":
-        return "diagnostic"
+    if profile.get("entity_category") == ENTITY_CATEGORY_DIAGNOSTIC:
+        return ENTITY_CATEGORY_DIAGNOSTIC
     if measurement.lower() == "disk":
-        return "diagnostic"
-    if field.lower() in {"uptime", "boot_time"}:
-        return "diagnostic"
+        return ENTITY_CATEGORY_DIAGNOSTIC
+
+    # Field-level diagnostics: lifecycle metadata, load averages, process counts.
+    field_lower = field.lower()
+    if (
+        field_lower in _DIAGNOSTIC_FIELDS
+        or field_lower in _LOAD_AVERAGE_FIELDS
+        or field_lower.startswith(_PROCESS_FIELD_PREFIX)
+    ):
+        return ENTITY_CATEGORY_DIAGNOSTIC
     return None
 
 
@@ -60,6 +78,6 @@ def _titleize(value: str) -> str:
 
 def _format_part(value: str) -> str:
     """Preserve explicit alias display labels while title-casing raw token values."""
-    if value in TAG_ALIASES.values():
+    if value in TAG_ALIASES.values() or value in FIELD_ALIASES.values():
         return value
     return _titleize(value)

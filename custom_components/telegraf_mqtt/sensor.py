@@ -10,8 +10,14 @@ from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+
+
+def _entity_category(value: str | None) -> EntityCategory | None:
+    """Coerce a resolved category string into HA's enum at the platform boundary."""
+    return EntityCategory(value) if value else None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -59,7 +65,7 @@ class TelegrafMqttSensor(SensorEntity):
         self._attr_native_unit_of_measurement = _normalize_native_unit(descriptor.native_unit)
         self._attr_device_class = descriptor.suggested_device_class
         self._attr_state_class = descriptor.suggested_state_class
-        self._attr_entity_category = descriptor.entity_category
+        self._attr_entity_category = _entity_category(descriptor.entity_category)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, state.device_id)},
             name=state.device_name,
@@ -118,6 +124,6 @@ class TelegrafMqttSensor(SensorEntity):
 
 
 def _normalize_native_unit(native_unit: str | None) -> str | None:
-    if native_unit == "°C":
+    if native_unit == "\u00b0C":
         return UnitOfTemperature.CELSIUS
     return native_unit

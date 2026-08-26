@@ -8,6 +8,7 @@ execution order can never pollute the real-HA harness tests.
 from __future__ import annotations
 
 import asyncio
+import enum
 import importlib
 import sys
 import types
@@ -69,6 +70,13 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    entity_helpers = types.ModuleType("homeassistant.helpers.entity")
+
+    class StubEntityCategory(str, enum.Enum):
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    entity_helpers.EntityCategory = StubEntityCategory
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
     monkeypatch.setitem(sys.modules, "homeassistant.components.sensor", sensor)
@@ -79,6 +87,7 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity", entity_helpers)
     return targets
 
 
@@ -250,3 +259,30 @@ def test_binary_sensor_refresh_guard_without_state(platform_env) -> None:
     assert entity.available is False
     assert entity.is_on is None
     assert entity.extra_state_attributes is None
+
+
+def test_diagnostic_descriptors_carry_entity_category_on_sensor(platform_env) -> None:
+    sensor_module = _fresh_module("sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("used_percent", 63.5, entity_category="diagnostic"))
+
+    added, _targets, _entry = _setup_platform(sensor_module, manager)
+
+    stub_ec = sys.modules["homeassistant.helpers.entity"].EntityCategory
+    assert added[0]._attr_entity_category is stub_ec.DIAGNOSTIC
+
+
+def test_non_diagnostic_descriptors_leave_entity_category_none(platform_env) -> None:
+    sensor_module = _fresh_module("sensor")
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("usage_idle", 12.5))
+    registry.update(_descriptor("link_up", True))
+
+    sensor_added, _targets, _entry = _setup_platform(sensor_module, manager)
+    binary_added, _btargets, _bentry = _setup_platform(binary_module, manager)
+
+    assert sensor_added[0]._attr_entity_category is None
+    assert binary_added[0]._attr_entity_category is None

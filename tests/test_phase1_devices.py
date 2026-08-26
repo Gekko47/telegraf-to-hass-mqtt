@@ -9,6 +9,10 @@ from pathlib import Path
 from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.registry import DeviceManager, _slugify_device
 
+# Expected device_id for the CPU payload's host, derived through the same slug
+# function the manager uses, so a digest-length change cannot desync these tests.
+GEKKO_DEVICE_ID = _slugify_device("CachyOS Gekko")
+
 _COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "telegraf_mqtt"
 
 CPU_PAYLOAD = json.dumps(
@@ -61,9 +65,9 @@ def test_manager_routes_descriptors_by_their_own_host() -> None:
 
     manager.process_message("telegraf/data", "{}", parser=_MixedParser())
 
-    assert set(manager.devices) == {"cachyos_gekko_705a925f7d", "server02"}
-    assert manager.get_metric("cachyos_gekko_705a925f7d:mixed_usage_idle") is None
-    state = manager.get_metric("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle")
+    assert set(manager.devices) == {GEKKO_DEVICE_ID, "server02"}
+    assert manager.get_metric(f"{GEKKO_DEVICE_ID}:mixed_usage_idle") is None
+    state = manager.get_metric(f"{GEKKO_DEVICE_ID}:cpu_cpu_total_usage_idle")
     assert state is not None and state.value == 88.4
 
 
@@ -79,11 +83,11 @@ def test_manager_slugs_host_into_stable_device_id() -> None:
             on_new_device=lambda device_id, name: discovered.append((device_id, name)),
         )
 
-    assert set(manager.devices) == {"cachyos_gekko_705a925f7d"}
-    assert discovered == [("cachyos_gekko_705a925f7d", "CachyOS Gekko")]
-    state = manager.get_metric("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle")
+    assert set(manager.devices) == {GEKKO_DEVICE_ID}
+    assert discovered == [(GEKKO_DEVICE_ID, "CachyOS Gekko")]
+    state = manager.get_metric(f"{GEKKO_DEVICE_ID}:cpu_cpu_total_usage_idle")
     assert state is not None
-    assert state.descriptor.device_id == "cachyos_gekko_705a925f7d"
+    assert state.descriptor.device_id == GEKKO_DEVICE_ID
     assert state.device_name == "CachyOS Gekko"
 
 
@@ -107,7 +111,7 @@ def test_composite_keys_are_stable_across_reprocessing() -> None:
     manager = DeviceManager()
     for _ in range(3):
         manager.process_message("telegraf/data", CPU_PAYLOAD, parser=TelegrafParser())
-    assert manager.keys() == ("cachyos_gekko_705a925f7d:cpu_cpu_total_usage_idle",)
+    assert manager.keys() == (f"{GEKKO_DEVICE_ID}:cpu_cpu_total_usage_idle",)
 
 
 def test_parser_layer_never_imports_homeassistant() -> None:

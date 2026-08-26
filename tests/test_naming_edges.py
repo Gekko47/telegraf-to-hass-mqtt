@@ -15,7 +15,13 @@ def test_disk_measurement_resolves_diagnostic_regardless_of_case() -> None:
     assert resolve_entity_category("Disk", "used_percent") == "diagnostic"
 
 
-def test_lifecycle_fields_resolve_diagnostic_on_any_measurement() -> None:
+def test_lifecycle_load_and_process_fields_resolve_diagnostic_on_any_measurement() -> None:
+    """SPEC.md: uptime/boot_time, load averages and process counts are DIAGNOSTIC."""
     assert resolve_entity_category("system", "uptime") == "diagnostic"
     assert resolve_entity_category("system", "boot_time") == "diagnostic"
-    assert resolve_entity_category("system", "load1") is None
+    assert resolve_entity_category("system", "load1") == "diagnostic"
+    assert resolve_entity_category("system", "load15") == "diagnostic"
+    assert resolve_entity_category("system", "processes_forked") == "diagnostic"
+    # Plain user-facing counts stay uncategorized.
+    assert resolve_entity_category("system", "n_users") is None
+    assert resolve_entity_category("system", "load_average") is None

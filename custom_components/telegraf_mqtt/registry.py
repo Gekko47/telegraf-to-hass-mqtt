@@ -27,9 +27,8 @@ def _slugify_device(value: str) -> str:
     if slug == value:
         # Normalization was lossless; keep the readable slug unchanged.
         return slug or "unknown"
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
     return f"{slug or 'unknown'}_{digest}"
-
 
 @dataclass
 class MetricState:
@@ -209,6 +208,8 @@ class MetricRegistry:
             if state.descriptor.cleanup_policy == "NEVER":
                 continue
             if state.descriptor.cleanup_policy == "ALWAYS":
+                if on_write is not None:
+                    on_write(unique_key, False, state.descriptor.value)
                 removed.append(unique_key)
                 self._states.pop(unique_key, None)
                 continue

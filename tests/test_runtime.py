@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from time import monotonic
 from typing import Any
 
 import custom_components.telegraf_mqtt as integration
@@ -196,3 +197,21 @@ def test_schedule_expiry_check_is_a_noop_without_time_tracking(monkeypatch) -> N
     integration._schedule_expiry_check(hass, entry)
 
     assert not hasattr(hass, "expiry_callback")
+
+
+def test_scheduled_cleanup_dispatches_update_for_always_metric(monkeypatch) -> None:
+    """Regression: scheduled cleanup notifies listeners when an ALWAYS metric is removed."""
+    _fake_mqtt, dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 1})
+
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    registry.update(replace(_descriptor(), cleanup_policy="ALWAYS"))
+    registry.last_any_metric = monotonic()
+
+    hass.expiry_callback(None)
+
+    assert dispatched == [
+        (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent")
+    ]

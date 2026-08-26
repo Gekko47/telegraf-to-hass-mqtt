@@ -9,8 +9,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+
+
+def _entity_category(value: str | None) -> EntityCategory | None:
+    """Coerce a resolved category string into HA's enum at the platform boundary."""
+    return EntityCategory(value) if value else None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -59,7 +65,7 @@ class TelegrafMqttBinarySensor(BinarySensorEntity):
         descriptor = state.descriptor
         self._attr_unique_id = f"{DOMAIN}_{state.device_id}_{descriptor.unique_key}"
         self._attr_name = descriptor.name
-        self._attr_entity_category = descriptor.entity_category
+        self._attr_entity_category = _entity_category(descriptor.entity_category)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, state.device_id)},
             name=state.device_name,

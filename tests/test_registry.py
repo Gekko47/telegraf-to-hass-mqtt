@@ -433,3 +433,85 @@ def test_set_parser_persists_for_subsequent_messages() -> None:
     )
 
     assert manager.get_metric("h1:mem_used_percent") is not None
+
+
+def test_cleanup_always_policy_notifies_on_write_before_removal() -> None:
+    clock = [0.0]
+    registry = MetricRegistry(expire_after=10, cleanup_delay=5, clock=lambda: clock[0])
+    registry.update(_descriptor("always_go", cleanup_policy="ALWAYS"))
+    writes: list[tuple[str, bool]] = []
+
+    def on_write(key: str, available: bool, value: object) -> None:
+        assert registry.get(key) is not None
+        writes.append((key, available))
+
+    clock[0] = 100.0
+    removed = registry.cleanup(on_write=on_write)
+
+    assert removed == ["always_go"]
+    assert writes == [("always_go", False)]
+    assert registry.get("always_go") is None
+
+
+def test_fully_stale_device_marks_entities_unavailable_and_never_deletes_them() -> None:
+    """Exit criterion: a fully-stale device goes unavailable but keeps every entity."""
+    clock = [100.0]
+    manager = DeviceManager(expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0])
+    registry = manager.get_or_create_registry("server09", "server09")
+    registry.update(_descriptor("mem_used_percent"))
+    registry.update(_descriptor("cpu_usage_idle"))
+    clock[0] = 200.0  # far past expire_after for every metric on the device
+
+    unavailable: list[tuple[str, bool]] = []
+    manager.check_expiry(
+        on_write=lambda key, available, value: unavailable.append((key, available))
+    )
+
+    assert set(unavailable) == {
+        ("server09:mem_used_percent", False),
+        ("server09:cpu_usage_idle", False),
+    }
+    assert all(
+        manager.get_metric(f"server09:{key}").is_available is False
+        for key in ("mem_used_percent", "cpu_usage_idle")
+    )
+
+    # Heartbeat long expired -> cleanup skips the whole device.
+    writes: list[tuple[str, bool]] = []
+    removed = manager.cleanup(
+        on_write=lambda key, available, value: writes.append((key, available))
+    )
+    assert removed == []
+    assert writes == []
+    assert manager.keys() == ("server09:mem_used_percent", "server09:cpu_usage_idle")
+
+
+def test_device_heartbeat_separates_offline_device_from_stale_metric() -> None:
+    """Per-metric expiry marks availability everywhere; the heartbeat gates cleanup."""
+    clock = [100.0]
+    manager = DeviceManager(expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0])
+
+    online = manager.get_or_create_registry("server01", "server01")
+    online.update(_descriptor("usage_idle"))
+    online.last_any_metric = 104.0  # heartbeat fresh: device is ACTIVE at t=107
+    online.get("usage_idle").last_updated = 90.0  # this individual metric is stale
+
+    offline = manager.get_or_create_registry("server02", "server02")
+    offline.update(_descriptor("used_percent"))
+    offline.last_any_metric = 50.0  # nothing received for ages: device OFFLINE
+    offline.get("used_percent").last_updated = 50.0
+
+    clock[0] = 107.0
+    unavailable: list[str] = []
+    manager.check_expiry(on_write=lambda key, available, value: unavailable.append(key))
+    assert set(unavailable) == {"server01:usage_idle", "server02:used_percent"}
+
+    # Only the ACTIVE device's stale metric becomes a cleanup candidate...
+    assert manager.cleanup() == ["server01:usage_idle"]
+    assert manager.get_metric("server01:usage_idle") is None
+    # ...the OFFLINE device keeps its entity however long the delay grows.
+    clock[0] = 10_000.0
+    assert manager.cleanup() == []
+    stale_state = manager.get_metric("server02:used_percent")
+    assert stale_state is not None
+    assert stale_state.is_available is False

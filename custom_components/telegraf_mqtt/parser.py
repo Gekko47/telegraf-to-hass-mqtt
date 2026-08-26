@@ -17,6 +17,7 @@ from .parsers import (
     parse_nvidia_gpu_payload,
     parse_sensors_payload,
 )
+from .parsers.base import PayloadParser
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 class TelegrafParser:
     """Parse raw Telegraf MQTT JSON payloads into metric descriptors."""
 
-    _PARSERS: ClassVar[dict] = {
+    _PARSERS: ClassVar[dict[str, PayloadParser]] = {
         "battery": parse_battery_payload,
         "cpu": parse_cpu_payload,
         "disk": parse_disk_payload,
@@ -38,7 +39,7 @@ class TelegrafParser:
         """Parse a raw MQTT payload."""
         try:
             decoded = json.loads(payload)
-        except TypeError, UnicodeDecodeError, json.JSONDecodeError:
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
             _LOGGER.debug("Invalid Telegraf JSON payload")
             return []
 
@@ -51,5 +52,10 @@ class TelegrafParser:
             _LOGGER.debug("Unsupported Telegraf payload shape")
             return []
 
-        handler = self._PARSERS.get(measurement, parse_generic_payload)
-        return handler(decoded)
+        handler = self._PARSERS.get(measurement)
+        if handler is None:
+            # SPEC.md logging table: an unknown measurement falls back to the
+            # generic parser quietly (DEBUG), never raising and never WARNING.
+            _LOGGER.debug("Unknown Telegraf measurement %r; using generic parser", measurement)
+            handler = parse_generic_payload
+        return list(handler(decoded))
