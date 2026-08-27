@@ -8,12 +8,15 @@ from typing import Any
 
 import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
+    CONF_CLEANUP_DELAY,
+    CONF_DELETE_DELAY,
     CONF_DEVICE_NAME,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
     CONF_TOPIC_PATTERN,
     SIGNAL_METRIC_UPDATED,
+    SIGNAL_REMOVE_METRIC,
 )
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 
@@ -100,6 +103,14 @@ def _patch_runtime(monkeypatch) -> tuple[FakeMqtt, list[tuple[str, str]]]:
     def fake_dispatch(hass: FakeHass, signal: str, unique_key: str) -> None:
         dispatched.append((signal, unique_key))
 
+    def fake_dispatcher_connect(_hass: FakeHass, _signal: str, _target: Callable[..., Any]) -> Callable[[], None]:
+        # Tests in this module don't exercise the entity-registry removal
+        # path (that's covered by tests/test_phase6_lifecycle.py under the
+        # real HA harness); recording the listener here is enough to keep
+        # ``async_setup_entry`` reachable and prevent real HA dispatch from
+        # touching the FakeHass' nonexistent ``.data`` attribute.
+        return lambda: None
+
     def fake_track_time_interval(hass: FakeHass, callback: Callable[[Any], None], interval: Any) -> Callable[[], None]:
         hass.expiry_callback = callback
         hass.expiry_interval = interval
@@ -114,6 +125,7 @@ def _patch_runtime(monkeypatch) -> tuple[FakeMqtt, list[tuple[str, str]]]:
     monkeypatch.setattr(integration, "PLATFORMS", [FakePlatform.SENSOR])
     monkeypatch.setattr(integration, "mqtt", fake_mqtt)
     monkeypatch.setattr(integration, "async_dispatcher_send", fake_dispatch)
+    monkeypatch.setattr(integration, "async_dispatcher_connect", fake_dispatcher_connect)
     monkeypatch.setattr(integration, "async_track_time_interval", fake_track_time_interval)
     return fake_mqtt, dispatched
 
@@ -179,6 +191,44 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
     )
 
 
+def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
+    monkeypatch,
+) -> None:
+    """``cleanup_delay`` and ``delete_delay`` are wired through the live
+    options-update path the same way ``expire_after`` is: changing them
+    on a config entry replaces the startup values on both the manager
+    and every per-device registry, and the integration is not reloaded.
+    """
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(
+        options={CONF_CLEANUP_DELAY: 30, CONF_DELETE_DELAY: 60}
+    )
+
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor())
+
+    # Startup values landed where we expect (sanity check before the update).
+    assert entry.runtime_data.manager._cleanup_delay == 30
+    assert entry.runtime_data.manager._delete_delay == 60
+    assert registry._cleanup_delay == 30
+    assert registry._delete_delay == 60
+
+    # Live update via the entry's update listener -- the same path
+    # ``add_update_listener`` fires when the user changes OptionsFlow values.
+    entry.options = {CONF_CLEANUP_DELAY: 5, CONF_DELETE_DELAY: 9}
+    asyncio.run(entry.update_listener(hass, entry))
+
+    # Manager-level values replaced.
+    assert entry.runtime_data.manager._cleanup_delay == 5
+    assert entry.runtime_data.manager._delete_delay == 9
+    # Existing per-device registry also picked up the change (not just
+    # newly-discovered devices created via ``get_or_create_registry``).
+    assert registry._cleanup_delay == 5
+    assert registry._delete_delay == 9
+
+
 def test_unload_entry_succeeds_without_platform_support(monkeypatch) -> None:
     """Import-isolation guard: unload short-circuits when HA platforms are absent."""
     monkeypatch.setattr(integration, "Platform", None)
@@ -213,5 +263,6 @@ def test_scheduled_cleanup_dispatches_update_for_always_metric(monkeypatch) -> N
     hass.expiry_callback(None)
 
     assert dispatched == [
-        (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent")
+        (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
+        (SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
     ]

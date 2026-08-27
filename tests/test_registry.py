@@ -286,6 +286,23 @@ def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_sta
     active_registry.last_any_metric = 107.0
     stale = active_registry.get("cpu_usage_idle")
     stale.last_updated = 100.0
+    # Add a second live metric so the device's ``min_active_metrics=1``
+    # guard is satisfied: cleanup will not drain a device to zero.
+    active_registry.update(
+        MetricDescriptor(
+            unique_key="mem_used_percent",
+            measurement="mem",
+            tags={"host": "server01"},
+            field="used_percent",
+            value=41.2,
+            timestamp=1721664000,
+            name="Memory Used Percent",
+            native_unit=None,
+            suggested_device_class=None,
+            suggested_state_class="measurement",
+            entity_category=None,
+        )
+    )
 
     offline_registry = manager.get_or_create_registry("server02", "server02")
     offline_registry.last_any_metric = 100.0
@@ -307,8 +324,22 @@ def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_sta
     offline_registry.get("mem_used_percent").last_updated = 100.0
 
     writes: list[tuple[str, bool]] = []
+    # Phase 6 lifecycle: ``check_expiry`` is what transitions stale metrics
+    # into the Cleanup Candidate state; only candidates are eligible for
+    # removal by ``cleanup``. After check_expiry we advance the clock past
+    # ``cleanup_delay=1`` so the candidate has lived long enough to remove.
+    manager.check_expiry(on_write=lambda key, available, value: writes.append((key, available)))
+    candidate_writes = list(writes)
+    writes.clear()
+    clock[0] = 200.0
+    active_registry.last_any_metric = 200.0
     removed = manager.cleanup(on_write=lambda key, available, value: writes.append((key, available)))
 
+    # Both devices saw their stale metric marked unavailable; only the
+    # active device's candidate is removed by cleanup.
+    assert {k for k, _ in candidate_writes} == {
+        "server01:cpu_usage_idle", "server02:mem_used_percent"
+    }
     assert removed == ["server01:cpu_usage_idle"]
     assert writes == [("server01:cpu_usage_idle", False)]
     assert manager.get_metric("server01:cpu_usage_idle") is None
@@ -349,6 +380,12 @@ def test_cleanup_enforces_never_and_always_policies() -> None:
     assert len(registry) == 3
 
     clock[0] = 100.0
+    # Phase 6 lifecycle: ALWAYS is removed immediately; NEVER is never a
+    # candidate; AUTO needs check_expiry first to become a candidate, and
+    # then waits cleanup_delay before removal. Advance past cleanup_delay
+    # so the AUTO candidate becomes eligible.
+    registry.check_expiry()
+    clock[0] = 200.0
     removed = registry.cleanup()
 
     assert removed == ["always_go", "auto_go"]
@@ -493,6 +530,8 @@ def test_device_heartbeat_separates_offline_device_from_stale_metric() -> None:
 
     online = manager.get_or_create_registry("server01", "server01")
     online.update(_descriptor("usage_idle"))
+    online.update(_descriptor("used_percent"))  # second live metric; satisfies min_active_metrics=1
+    online.get("used_percent").last_updated = 106.0  # fresh, so it stays available
     online.last_any_metric = 104.0  # heartbeat fresh: device is ACTIVE at t=107
     online.get("usage_idle").last_updated = 90.0  # this individual metric is stale
 
@@ -507,10 +546,14 @@ def test_device_heartbeat_separates_offline_device_from_stale_metric() -> None:
     assert set(unavailable) == {"server01:usage_idle", "server02:used_percent"}
 
     # Only the ACTIVE device's stale metric becomes a cleanup candidate...
+    manager.check_expiry()
+    clock[0] = 200.0
+    online.last_any_metric = 200.0
     assert manager.cleanup() == ["server01:usage_idle"]
     assert manager.get_metric("server01:usage_idle") is None
     # ...the OFFLINE device keeps its entity however long the delay grows.
     clock[0] = 10_000.0
+    manager.check_expiry()
     assert manager.cleanup() == []
     stale_state = manager.get_metric("server02:used_percent")
     assert stale_state is not None

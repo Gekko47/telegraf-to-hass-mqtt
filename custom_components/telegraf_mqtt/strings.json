@@ -15,7 +15,11 @@
         "data": {
           "exclude_patterns": "Exclude patterns",
           "field_overrides": "Field overrides",
-          "expire_after": "Expire after"
+          "expire_after": "Expire after",
+          "enable_cleanup": "Enable automatic cleanup",
+          "cleanup_delay": "Cleanup delay (seconds)",
+          "delete_delay": "Delete delay (seconds)",
+          "min_active_metrics": "Minimum active metrics per device"
         }
       }
     },

@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models import MetricDescriptor, MetricValue, frozen_tags
 from ..naming import resolve_entity_category, resolve_name
+from .static import is_static_field
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 suggested_device_class=infer_device_class(measurement, field),
                 suggested_state_class=infer_state_class(field, value),
                 entity_category=resolve_entity_category(measurement, field),
+                # Phase 6: static system metadata (CPU model, vendor id, n_cpus,
+                # uptime_format, ...) is never cleaned up; everything else is AUTO.
+                cleanup_policy="NEVER" if is_static_field(measurement, field) else "AUTO",
                 device_id=clean_tags.get("host", ""),
             )
         )

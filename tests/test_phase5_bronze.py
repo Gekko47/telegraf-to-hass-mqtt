@@ -116,6 +116,15 @@ def _patch(monkeypatch: pytest.MonkeyPatch) -> FakeMqtt:
     def fake_dispatch(_hass: Any, _signal: str, _key: str) -> None:
         return None
 
+    def fake_dispatcher_connect(_hass: Any, _signal: str, _target: Callable[..., Any]) -> Callable[[], None]:
+        # Phase 6: ``async_setup_entry`` now also subscribes to
+        # ``SIGNAL_REMOVE_METRIC`` via ``async_dispatcher_connect``. The
+        # Bronze tests in this module don't exercise the entity-registry
+        # removal path; recording the listener (and returning a cancel
+        # handle) is enough to keep ``async_setup_entry`` reachable
+        # without the real HA dispatcher touching a non-HA FakeHass.
+        return lambda: None
+
     def fake_track_time_interval(_hass: Any, _cb: Any, _interval: Any) -> Callable[[], None]:
         return lambda: None
 
@@ -123,6 +132,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch) -> FakeMqtt:
     monkeypatch.setattr(integration, "PLATFORMS", [FakePlatform.SENSOR, FakePlatform.BINARY_SENSOR])
     monkeypatch.setattr(integration, "mqtt", fake_mqtt)
     monkeypatch.setattr(integration, "async_dispatcher_send", fake_dispatch)
+    monkeypatch.setattr(integration, "async_dispatcher_connect", fake_dispatcher_connect)
     monkeypatch.setattr(integration, "async_track_time_interval", fake_track_time_interval)
     return fake_mqtt
 

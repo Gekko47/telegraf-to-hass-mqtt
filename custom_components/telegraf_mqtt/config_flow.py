@@ -10,13 +10,21 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    CONF_CLEANUP_DELAY,
+    CONF_DELETE_DELAY,
     CONF_DEVICE_NAME,
+    CONF_ENABLE_CLEANUP,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
+    CONF_MIN_ACTIVE_METRICS,
     CONF_TOPIC_PATTERN,
+    DEFAULT_CLEANUP_DELAY,
+    DEFAULT_DELETE_DELAY,
     DEFAULT_DEVICE_NAME,
+    DEFAULT_ENABLE_CLEANUP,
     DEFAULT_EXPIRE_AFTER,
+    DEFAULT_MIN_ACTIVE_METRICS,
     DEFAULT_TOPIC_PATTERN,
     DOMAIN,
 )
@@ -58,6 +66,19 @@ class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(CONF_EXCLUDE_PATTERNS, default=[]): list,
                     vol.Optional(CONF_FIELD_OVERRIDES, default={}): dict,
                     vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): int,
+                    # Phase 6: per-metric + device-lifecycle tunables.
+                    vol.Optional(
+                        CONF_ENABLE_CLEANUP, default=DEFAULT_ENABLE_CLEANUP
+                    ): bool,
+                    vol.Optional(
+                        CONF_CLEANUP_DELAY, default=DEFAULT_CLEANUP_DELAY
+                    ): int,
+                    vol.Optional(
+                        CONF_DELETE_DELAY, default=DEFAULT_DELETE_DELAY
+                    ): int,
+                    vol.Optional(
+                        CONF_MIN_ACTIVE_METRICS, default=DEFAULT_MIN_ACTIVE_METRICS
+                    ): int,
                 }
             ),
         )

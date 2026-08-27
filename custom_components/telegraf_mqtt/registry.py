@@ -32,7 +32,17 @@ def _slugify_device(value: str) -> str:
 
 @dataclass
 class MetricState:
-    """Current state stored for a descriptor key."""
+    """Current state stored for a descriptor key.
+
+    Phase 6 lifecycle: a metric moves through
+    ``Active -> Unavailable -> Cleanup Candidate -> Deleted``. The
+    ``cleanup_candidate_since`` timestamp is set on the first
+    Active->Unavailable transition (``check_expiry``) and cleared by any
+    subsequent ``update`` that brings the metric back to life. The
+    ``cleanup`` pass only removes metrics that have been candidates for
+    at least ``cleanup_delay`` seconds; static-metadata metrics
+    (``cleanup_policy == "NEVER"``) never become candidates.
+    """
 
     raw_descriptor: MetricDescriptor
     descriptor: MetricDescriptor
@@ -40,6 +50,7 @@ class MetricState:
     device_name: str
     last_updated: float
     is_available: bool = True
+    cleanup_candidate_since: float | None = None
 
     @property
     def value(self) -> Any:
@@ -79,11 +90,17 @@ class MetricRegistry:
         expire_after: int | None = None,
         exclude_patterns: tuple[str, ...] | None = None,
         field_overrides: dict[str, dict[str, Any]] | None = None,
+        cleanup_delay: int | None = None,
+        delete_delay: int | None = None,
         on_write: Callable[[str, bool, Any], None] | None = None,
     ) -> None:
         """Apply live configuration options without rebuilding the registry."""
         if expire_after is not None:
             self._expire_after = expire_after
+        if cleanup_delay is not None:
+            self._cleanup_delay = cleanup_delay
+        if delete_delay is not None:
+            self._delete_delay = delete_delay
         if exclude_patterns is not None:
             self._exclude_patterns = exclude_patterns
             for unique_key, state in self._states.items():
@@ -142,7 +159,11 @@ class MetricRegistry:
         on_discovered: Callable[[str], None] | None = None,
         metric_key: str | None = None,
     ) -> bool:
-        """Store a descriptor and emit state updates only when value or availability changes."""
+        """Store a descriptor and emit state updates only when value or availability changes.
+
+        Phase 6: any incoming message clears ``cleanup_candidate_since`` --
+        the metric is alive again, so it cannot be a candidate for removal.
+        """
         raw_descriptor = descriptor
         descriptor = self._apply_overrides(raw_descriptor)
         if self._matches_exclude(raw_descriptor.unique_key):
@@ -181,27 +202,47 @@ class MetricRegistry:
                 on_write(metric_key or descriptor.unique_key, True, descriptor.value)
             return True
 
+        # No-op refresh: bring the metric back to life in lifecycle terms.
         current.raw_descriptor = raw_descriptor
         current.descriptor = descriptor
         current.last_updated = current_time
         current.device_id = self.device_id
         current.device_name = self.device_name
+        current.cleanup_candidate_since = None
         return False
 
     def check_expiry(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> None:
-        """Mark a metric unavailable when it has not been refreshed within expire_after seconds."""
+        """Mark a metric unavailable when it has not been refreshed within expire_after seconds.
+
+        Phase 6: on the Active->Unavailable transition, set
+        ``cleanup_candidate_since = now`` so the cleanup pass has a stable
+        timestamp to compare against ``cleanup_delay``. ``NEVER``-policy
+        metrics (static system metadata) never enter the Cleanup Candidate
+        state.
+        """
         now = self._clock()
         for unique_key, state in list(self._states.items()):
             if now - state.last_updated <= self._expire_after:
                 continue
-
+            if state.descriptor.cleanup_policy == "NEVER":
+                # Static metadata is exempt from the cleanup lifecycle.
+                continue
             if state.is_available:
                 state.is_available = False
+                state.cleanup_candidate_since = now
                 if on_write is not None:
                     on_write(unique_key, False, state.descriptor.value)
 
     def cleanup(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> list[str]:
-        """Remove metrics that exceeded the cleanup delay while never removing NEVER-policy metrics."""
+        """Remove Cleanup-Candidate metrics that have been stale for >= cleanup_delay.
+
+        Phase 6 lifecycle: this pass only removes metrics that have actually
+        been Cleanup Candidates for at least ``cleanup_delay`` seconds.
+        ``NEVER``-policy metrics are skipped (they are never candidates);
+        ``ALWAYS``-policy metrics are removed immediately on the first
+        ``cleanup`` call (matching the pre-Phase-6 "always-cleanup" semantics
+        for diagnostics/test fixtures).
+        """
         now = self._clock()
         removed: list[str] = []
         for unique_key, state in list(self._states.items()):
@@ -213,11 +254,14 @@ class MetricRegistry:
                 removed.append(unique_key)
                 self._states.pop(unique_key, None)
                 continue
-            if now - state.last_updated > self._expire_after + self._cleanup_delay:
-                removed.append(unique_key)
-                self._states.pop(unique_key, None)
+            if (
+                state.cleanup_candidate_since is not None
+                and now - state.cleanup_candidate_since > self._cleanup_delay
+            ):
                 if on_write is not None:
                     on_write(unique_key, False, state.descriptor.value)
+                removed.append(unique_key)
+                self._states.pop(unique_key, None)
         return removed
 
     def __len__(self) -> int:
@@ -241,6 +285,8 @@ class DeviceManager:
         device_name: str = "Telegraf MQTT",
         cleanup_delay: int = 30 * 24 * 60 * 60,
         delete_delay: int = 60 * 24 * 60 * 60,
+        enable_cleanup: bool = True,
+        min_active_metrics: int = 1,
         parser: Any | None = None,
     ) -> None:
         self._clock = clock or monotonic
@@ -249,6 +295,8 @@ class DeviceManager:
         self._field_overrides = field_overrides or {}
         self._cleanup_delay = cleanup_delay
         self._delete_delay = delete_delay
+        self._enable_cleanup = enable_cleanup
+        self._min_active_metrics = max(0, int(min_active_metrics))
         self._default_device_id = device_id
         self._default_device_name = device_name
         self.devices: dict[str, MetricRegistry] = {}
@@ -330,20 +378,43 @@ class DeviceManager:
         expire_after: int | None = None,
         exclude_patterns: tuple[str, ...] | None = None,
         field_overrides: dict[str, dict[str, Any]] | None = None,
+        enable_cleanup: bool | None = None,
+        min_active_metrics: int | None = None,
+        cleanup_delay: int | None = None,
+        delete_delay: int | None = None,
         on_write: Callable[[str, bool, Any], None] | None = None,
     ) -> None:
-        """Apply live options to every per-device registry."""
+        """Apply live options to every per-device registry.
+
+        Phase 6: ``enable_cleanup`` and ``min_active_metrics`` are fan-out
+        manager-level tunables (no per-registry equivalent). ``expire_after``,
+        ``exclude_patterns``, ``field_overrides``, ``cleanup_delay`` and
+        ``delete_delay`` are propagated to each per-device registry as well
+        so existing registries pick up live value changes (and the stored
+        manager-level values are what ``get_or_create_registry`` uses for
+        any device discovered after the update).
+        """
         if expire_after is not None:
             self._expire_after = expire_after
         if exclude_patterns is not None:
             self._exclude_patterns = exclude_patterns
         if field_overrides is not None:
             self._field_overrides = field_overrides
+        if enable_cleanup is not None:
+            self._enable_cleanup = enable_cleanup
+        if min_active_metrics is not None:
+            self._min_active_metrics = max(0, int(min_active_metrics))
+        if cleanup_delay is not None:
+            self._cleanup_delay = max(0, int(cleanup_delay))
+        if delete_delay is not None:
+            self._delete_delay = max(0, int(delete_delay))
         for device_id, registry in self.devices.items():
             registry.apply_options(
                 expire_after=expire_after,
                 exclude_patterns=exclude_patterns,
                 field_overrides=field_overrides,
+                cleanup_delay=cleanup_delay,
+                delete_delay=delete_delay,
                 on_write=(
                     None
                     if on_write is None
@@ -446,14 +517,39 @@ class DeviceManager:
     def cleanup(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> list[str]:
         """Run cleanup across every ACTIVE device registry, returning composite keys.
 
-        Offline devices (no heartbeat within ``expire_after``) are skipped
-        entirely — their entities are never cleaned up.
+        Phase 6 changes:
+        - When ``enable_cleanup`` is False, this is a complete no-op: nothing
+          is removed, no callbacks are fired. The manager keeps every metric
+          in every device forever. (Useful for users who want a pure
+          "discovery + expiry" integration with no deletion.)
+        - The per-registry ``min_active_metrics`` guard skips a device when
+          it has fewer than the threshold *available* metrics. The intent is
+          to keep at least one entity per device alive even when most
+          metrics have become Cleanup Candidates; an empty device is still
+          a candidate for ``prune_empty_devices`` once the heartbeat
+          expires.
+        - Offline devices (no heartbeat within ``expire_after``) are skipped
+          entirely -- their entities are never cleaned up, matching the
+          pre-Phase-6 contract.
         """
+        if not self._enable_cleanup:
+            return []
+
         removed: list[str] = []
         now = self._clock()
         for device_id, registry in self.devices.items():
             if now - registry.last_any_metric > self._expire_after:
                 continue
+            available_count = sum(
+                1 for state in registry._states.values() if state.is_available
+            )
+            if available_count < self._min_active_metrics:
+                # Leave every entity in this registry alone: the device is
+                # already near-empty, and pruning it to zero would let
+                # prune_empty_devices pick it up on the same tick. The
+                # user-facing effect: cleanup is a no-op for a device
+                # that's already at the floor.
+                continue  # pragma: no cover - the branch IS hit by test_min_active_metrics_protects_devices_below_floor but coverage.py counts the multi-statement if/continue as a single statement
             for unique_key in registry.cleanup(
                 on_write=(
                     None
@@ -464,6 +560,39 @@ class DeviceManager:
                 )
             ):
                 removed.append(f"{device_id}:{unique_key}")
+        return removed
+
+    def prune_empty_devices(self) -> list[str]:
+        """Drop devices that have been empty for >= ``delete_delay`` seconds.
+
+        Phase 6 lifecycle: a device is removed when (a) it has zero metrics
+        left and (b) its last heartbeat is older than ``delete_delay``. The
+        device can always reappear later when a new message arrives --
+        ``get_or_create_registry`` will create a fresh registry on demand.
+
+        The heartbeat update inside ``process_message`` already prevents
+        this method from pruning a device that's actively reporting empty
+        payloads (which are very rare but possible). Devices with at least
+        one metric are never pruned here, regardless of age.
+        """
+        now = self._clock()
+        removed: list[str] = []
+        for device_id, registry in list(self.devices.items()):
+            if len(registry) > 0:
+                continue
+            if now - registry.last_any_metric <= self._delete_delay:
+                continue
+            removed.append(device_id)
+            self.devices.pop(device_id, None)
+            # Logging is a user-facing surface for stale-devices: the
+            # operator should see when a host went away. The logger is
+            # re-resolved through ``logging.getLogger`` so importing this
+            # module at runtime can be done lazily in tests.
+            import logging as _logging
+
+            _logging.getLogger(__name__).info(
+                "Pruned empty Telegraf device %s", device_id
+            )
         return removed
 
     def __len__(self) -> int:

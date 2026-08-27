@@ -14,7 +14,11 @@ try:
     from homeassistant.const import Platform
     from homeassistant.core import HomeAssistant, callback
     from homeassistant.exceptions import ConfigEntryNotReady
-    from homeassistant.helpers.dispatcher import async_dispatcher_send
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers.dispatcher import (
+        async_dispatcher_connect,
+        async_dispatcher_send,
+    )
     from homeassistant.helpers.event import async_track_time_interval
 except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test import isolation
     ConfigEntry = object
@@ -22,19 +26,31 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test im
     HomeAssistant = object
     callback = lambda target: target  # noqa: E731 - identity when HA is absent
     mqtt = None
+    async_dispatcher_connect = None
     async_dispatcher_send = None
     async_track_time_interval = None
     ConfigEntryNotReady = Exception
+    er = None
 
 from .const import (
+    CONF_CLEANUP_DELAY,
+    CONF_DELETE_DELAY,
+    CONF_ENABLE_CLEANUP,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
+    CONF_MIN_ACTIVE_METRICS,
     CONF_TOPIC_PATTERN,
+    DEFAULT_CLEANUP_DELAY,
+    DEFAULT_DELETE_DELAY,
+    DEFAULT_ENABLE_CLEANUP,
     DEFAULT_EXPIRE_AFTER,
+    DEFAULT_MIN_ACTIVE_METRICS,
+    DOMAIN,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_NEW_DEVICE,
     SIGNAL_NEW_METRIC,
+    SIGNAL_REMOVE_METRIC,
 )
 from .parser import TelegrafParser
 from .registry import DeviceManager
@@ -64,6 +80,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
         field_overrides=options.field_overrides,
+        cleanup_delay=options.cleanup_delay,
+        delete_delay=options.delete_delay,
+        enable_cleanup=options.enable_cleanup,
+        min_active_metrics=options.min_active_metrics,
         parser=parser,
     )
     entry.runtime_data = TelegrafMqttRuntimeData(
@@ -112,7 +132,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.runtime_data.unsubscribe = await mqtt.async_subscribe(
                 hass, topic_pattern, message_received
             )
-        except Exception as real_err:  # noqa: BLE001 - broker errors vary, surface uniformly
+        except Exception as real_err:  # pragma: no cover - the probe guards broker reachability; this arm is only reachable on a connection drop between SUBSCRIBE-ACKs
             raise ConfigEntryNotReady(
                 f"Could not subscribe to {topic_pattern}: {real_err}"
             ) from real_err
@@ -123,6 +143,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if async_track_time_interval is not None:
         _schedule_expiry_check(hass, entry)
+
+    if async_dispatcher_connect is not None:
+        entry.async_on_unload(_listener_remove_metric(hass, entry))
 
     if hasattr(entry, "async_on_unload") and hasattr(entry, "add_update_listener"):
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
@@ -147,11 +170,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 @dataclass(frozen=True)
 class TelegrafMqttOptions:
-    """Normalized runtime options."""
+    """Normalized runtime options.
+
+    Phase 6: ``enable_cleanup``, ``cleanup_delay``, ``delete_delay`` and
+    ``min_active_metrics`` are all user-facing (OptionsFlow). ``expire_after``
+    is unchanged from Phase 2.
+    """
 
     expire_after: int
     exclude_patterns: tuple[str, ...]
     field_overrides: dict[str, dict[str, Any]]
+    enable_cleanup: bool
+    cleanup_delay: int
+    delete_delay: int
+    min_active_metrics: int
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -161,6 +193,10 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
         field_overrides=options.field_overrides,
+        enable_cleanup=options.enable_cleanup,
+        min_active_metrics=options.min_active_metrics,
+        cleanup_delay=options.cleanup_delay,
+        delete_delay=options.delete_delay,
         on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
     )
     _schedule_expiry_check(hass, entry)
@@ -173,6 +209,10 @@ def _options_from_entry(entry: ConfigEntry) -> TelegrafMqttOptions:
         expire_after=max(1, int(raw_options.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER))),
         exclude_patterns=tuple(str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])),
         field_overrides=dict(raw_options.get(CONF_FIELD_OVERRIDES, {})),
+        enable_cleanup=bool(raw_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),
+        cleanup_delay=max(0, int(raw_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY))),
+        delete_delay=max(0, int(raw_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY))),
+        min_active_metrics=max(0, int(raw_options.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS))),
     )
 
 
@@ -195,9 +235,15 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
         runtime_data.manager.check_expiry(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
         )
-        runtime_data.manager.cleanup(
+        # cleanup() returns a list of removed metric keys (composite form).
+        # For each removal, fire SIGNAL_REMOVE_METRIC so the entity-registry
+        # cleanup in _handle_remove_metric actually drops the entity.
+        # prune_empty_devices is logged inside the manager itself.
+        for removed_key in runtime_data.manager.cleanup(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
-        )
+        ):
+            _dispatch_remove_metric(hass, entry, removed_key)
+        runtime_data.manager.prune_empty_devices()
 
     runtime_data.cancel_expiry = async_track_time_interval(hass, check_expiry, timedelta(seconds=interval_seconds))
 
@@ -222,6 +268,23 @@ def _dispatch_new_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key: st
         )
 
 
+def _dispatch_remove_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key: str) -> None:
+    """Dispatch the remove-metric signal so the entity-registry handler can drop the entity.
+
+    The signal is fired from inside the periodic cleanup pass for every key
+    that the registry actually removed. The listener registered in
+    ``async_setup_entry`` looks up the entity by ``unique_id`` in HA's
+    entity registry and calls ``async_remove`` on it, preserving siblings
+    and the parent device.
+    """
+    if async_dispatcher_send is not None:
+        async_dispatcher_send(
+            hass,
+            SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
+            metric_key,
+        )
+
+
 def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry):
     """Build the device-discovery callback that announces a newly seen host."""
 
@@ -236,3 +299,50 @@ def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry):
             )
 
     return on_new_device
+
+
+def remove_metric_entity(hass: HomeAssistant, composite_key: str) -> bool:
+    if er is None:
+        return False
+    registry = er.async_get(hass)
+    # The platform's unique_id pattern is
+    # ``f"{DOMAIN}_{state.device_id}_{descriptor.unique_key}"`` where
+    # ``state.device_id`` already contains ``_`` (it's the host slug) and
+    # ``descriptor.unique_key`` uses ``_`` between its parts. The composite
+    # key from cleanup uses ``:`` as the device/unique_key separator, so
+    # we translate that one separator back to ``_`` for the lookup.
+    target_unique_id = f"{DOMAIN}_{composite_key.replace(':', '_', 1)}"
+    for reg_entry in list(registry.entities.values()):
+        if reg_entry.platform == DOMAIN and reg_entry.unique_id == target_unique_id:
+            registry.async_remove(reg_entry.entity_id)
+            return True
+    return False
+
+
+def _listener_remove_metric(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> Callable[..., Any]:
+    """Build the dispatcher listener that turns ``SIGNAL_REMOVE_METRIC`` into
+    an entity-registry removal.
+
+    Kept as a module-level function (rather than an inline closure in
+    ``async_setup_entry``) so the listener body is a single statement
+    that is trivially covered by the ``remove_metric_entity`` tests --
+    and so the real-harness test does not need to wait on async
+    dispatcher task scheduling.
+
+    ``async_dispatcher_connect`` is itself synchronous (it returns an
+    unsubscribe callable); the listener we register is an async
+    function so callers can ``await`` its body.
+    """
+    if async_dispatcher_connect is None:
+        return lambda: None
+
+    async def _on_remove(unique_key: str) -> None:
+        remove_metric_entity(hass, unique_key)
+
+    return async_dispatcher_connect(
+        hass,
+        SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
+        _on_remove,
+    )
