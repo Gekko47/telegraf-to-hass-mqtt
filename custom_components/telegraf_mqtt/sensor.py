@@ -48,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 class TelegrafMqttSensor(SensorEntity):
     """Sensor backed by one Telegraf metric on one discovered device."""
 
+    _attr_has_entity_name = True
     _attr_should_poll = False
 
     def __init__(self, entry: ConfigEntry, metric_key: str) -> None:

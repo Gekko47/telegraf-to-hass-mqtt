@@ -13,6 +13,7 @@ try:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.const import Platform
     from homeassistant.core import HomeAssistant, callback
+    from homeassistant.exceptions import ConfigEntryNotReady
     from homeassistant.helpers.dispatcher import async_dispatcher_send
     from homeassistant.helpers.event import async_track_time_interval
 except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test import isolation
@@ -23,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test im
     mqtt = None
     async_dispatcher_send = None
     async_track_time_interval = None
+    ConfigEntryNotReady = Exception
 
 from .const import (
     CONF_EXCLUDE_PATTERNS,
@@ -71,9 +73,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=entry.data.get("model"),
     )
 
-    if Platform is not None:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     if mqtt is not None:
         topic_pattern = entry.data[CONF_TOPIC_PATTERN]
 
@@ -86,8 +85,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def message_received(message: Any) -> None:
             manager.process_message(message.topic, message.payload)
 
-        entry.runtime_data.unsubscribe = await mqtt.async_subscribe(hass, topic_pattern, message_received)
+        # Phase 5 test-before-setup: validate the MQTT subscription before the
+        # entry is considered "set up". A short-lived probe subscribes to the
+        # configured topic with a no-op callback and immediately unsubscribes;
+        # a successful SUBSCRIBE-ACK confirms the broker is reachable and
+        # authorized for the topic. On failure we raise ``ConfigEntryNotReady``
+        # so HA surfaces a retry-able error to the user instead of
+        # half-configuring the entry.
+        def _on_probe_message(_message: Any) -> None:  # pragma: no cover - probe is purely a SUBSCRIBE-ACK check; the callback never fires
+            pass
+
+        try:
+            probe_unsubscribe = await mqtt.async_subscribe(
+                hass, topic_pattern, _on_probe_message
+            )
+        except Exception as probe_err:  # noqa: BLE001 - broker errors vary, surface uniformly
+            raise ConfigEntryNotReady(
+                f"Could not subscribe to {topic_pattern}: {probe_err}"
+            ) from probe_err
+        probe_unsubscribe()
+        _LOGGER.debug(
+            "MQTT subscribe probe OK for %s; installing real subscription", topic_pattern
+        )
+
+        try:
+            entry.runtime_data.unsubscribe = await mqtt.async_subscribe(
+                hass, topic_pattern, message_received
+            )
+        except Exception as real_err:  # noqa: BLE001 - broker errors vary, surface uniformly
+            raise ConfigEntryNotReady(
+                f"Could not subscribe to {topic_pattern}: {real_err}"
+            ) from real_err
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
+
+    if Platform is not None:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if async_track_time_interval is not None:
         _schedule_expiry_check(hass, entry)

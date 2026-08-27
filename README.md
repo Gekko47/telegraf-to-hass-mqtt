@@ -38,6 +38,13 @@ This integration is designed for the Telegraf-to-Home-Assistant MQTT flow:
 1. Copy the `custom_components/telegraf_mqtt` directory into your Home Assistant `custom_components` directory.
 2. Restart Home Assistant.
 
+## Removal
+
+1. Settings -> Devices & Services -> **Telegraf MQTT** -> ... -> **Delete**.
+2. Restart Home Assistant.
+3. Manual install: also remove the `custom_components/telegraf_mqtt` directory.
+4. If orphaned entries remain, remove only the Telegraf MQTT entries from the
+   entity registry. Back up Home Assistant before any manual registry edit.
 ## Configure
 
 After installation:
@@ -85,7 +92,15 @@ Numeric metrics are projected as Home Assistant `sensor` entities.
 
 Boolean metrics are projected as Home Assistant `binary_sensor` entities.
 
-This split prevents boolean fields from being forced into the numeric sensor path and keeps the entity model consistent with Home Assistant semantics.
+This split is automatic: any Telegraf field whose value is a boolean (for
+example `link_up` in a `net` measurement) becomes a `binary_sensor` entity,
+while every numeric field stays on the `sensor` platform. No per-field
+configuration is required.
+
+Units are stored exactly as Telegraf reports them — byte counters remain raw
+byte counts (`B`), never converted to KB/MB/GB — and each entity carries the
+device class / state class pair Home Assistant's recorder accepts for
+long-term statistics.
 
 ## Architecture
 
