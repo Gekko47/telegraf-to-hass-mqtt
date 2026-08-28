@@ -12,6 +12,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+from .icons import ICON_FOR_KEY
+from .naming import ENTITY_CATEGORY_DIAGNOSTIC, infer_icon_key
 
 
 def _entity_category(value: str | None) -> EntityCategory | None:
@@ -45,10 +47,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class TelegrafMqttBinarySensor(BinarySensorEntity):
-    """Binary sensor backed by one Telegraf metric on one discovered device."""
+    """Binary sensor backed by one Telegraf metric on one discovered device.
+
+    Phase 9: translation-driven display, icon from icons.ICON_FOR_KEY,
+    diagnostic entities disabled by default. Mirrors TelegrafMqttSensor.
+    """
 
     _attr_has_entity_name = True
     _attr_should_poll = False
+    _attr_translation_key: str | None = None
+    _attr_translation_placeholders: dict[str, str] | None = None
+    _attr_entity_registry_enabled_default: bool = True
 
     def __init__(self, entry: ConfigEntry, metric_key: str) -> None:
         self._entry = entry
@@ -65,13 +74,22 @@ class TelegrafMqttBinarySensor(BinarySensorEntity):
             return
         descriptor = state.descriptor
         self._attr_unique_id = f"{DOMAIN}_{state.device_id}_{descriptor.unique_key}"
-        self._attr_name = descriptor.name
+        self._attr_translation_key = descriptor.translation_key
+        self._attr_translation_placeholders = dict(descriptor.translation_placeholders)
         self._attr_entity_category = _entity_category(descriptor.entity_category)
+        self._attr_entity_registry_enabled_default = (
+            descriptor.entity_category != ENTITY_CATEGORY_DIAGNOSTIC
+        )
+        self._attr_icon = ICON_FOR_KEY.get(
+            infer_icon_key(descriptor.measurement, descriptor.field),
+            ICON_FOR_KEY["binary"],
+        )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, state.device_id)},
             name=state.device_name,
             manufacturer=self._entry.runtime_data.manufacturer,
             model=self._entry.runtime_data.model,
+            sw_version=self._entry.runtime_data.sw_version,
         )
 
     async def async_added_to_hass(self) -> None:

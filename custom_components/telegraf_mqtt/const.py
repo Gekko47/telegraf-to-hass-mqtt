@@ -11,6 +11,10 @@ CONF_ENABLE_CLEANUP = "enable_cleanup"
 CONF_CLEANUP_DELAY = "cleanup_delay"
 CONF_DELETE_DELAY = "delete_delay"
 CONF_MIN_ACTIVE_METRICS = "min_active_metrics"
+# Phase 9: per-device metadata carried in the DeviceInfo.
+CONF_MANUFACTURER = "manufacturer"
+CONF_MODEL = "model"
+CONF_SW_VERSION = "sw_version"
 DEFAULT_TOPIC_PATTERN = "telegraf/#"
 DEFAULT_DEVICE_NAME = "Telegraf MQTT"
 DEFAULT_EXPIRE_AFTER = 120

@@ -2,11 +2,78 @@
 
 from __future__ import annotations
 
-from custom_components.telegraf_mqtt.naming import resolve_entity_category, resolve_name
+from custom_components.telegraf_mqtt.naming import (
+    infer_icon_key,
+    resolve_entity_category,
+    resolve_translation,
+)
 
 
-def test_resolve_name_skips_empty_tag_values() -> None:
-    assert resolve_name("mem", {"host": "h", "empty_tag": ""}, "used_percent") == "Used Percent"
+def test_resolve_translation_cpu_field() -> None:
+    key, placeholders = resolve_translation("cpu", {"host": "h"}, "usage_idle")
+    assert key == "cpu_field"
+    assert placeholders == {"field": "Usage Idle"}
+
+
+def test_resolve_translation_skips_empty_tag_values() -> None:
+    key, placeholders = resolve_translation("mem", {"host": "h", "empty_tag": ""}, "used_percent")
+    assert key == "memory_field"
+    assert placeholders == {"field": "Used Percent"}
+
+
+def test_resolve_translation_sensors_coretemp_returns_cpu_package_temperature() -> None:
+    key, placeholders = resolve_translation(
+        "sensors",
+        {"host": "h", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
+        "temp_input",
+    )
+    assert key == "cpu_package_temperature"
+    assert placeholders == {}
+
+
+def test_resolve_translation_disk_root_path() -> None:
+    key, placeholders = resolve_translation("disk", {"host": "h", "path": "/"}, "used_percent")
+    assert key == "disk_root_field"
+    assert placeholders == {"field": "Used Percent"}
+
+
+def test_resolve_translation_network_includes_interface() -> None:
+    key, placeholders = resolve_translation("net", {"host": "h", "interface": "wlan0"}, "bytes_recv")
+    assert key == "network_field"
+    assert placeholders == {"field": "Bytes Received", "interface": "wlan0"}
+
+
+def test_resolve_translation_unknown_measurement_falls_back_to_generic() -> None:
+    key, placeholders = resolve_translation("custom_plugin", {"host": "h"}, "watts")
+    assert key == "generic_field"
+    assert placeholders == {"field": "Watts"}
+
+
+def test_resolve_translation_disk_non_root_path() -> None:
+    """A ``disk`` payload without ``path == "/"`` uses the generic disk_field key."""
+    key, placeholders = resolve_translation(
+        "disk", {"host": "h", "path": "/data"}, "used_percent"
+    )
+    assert key == "disk_field"
+    assert placeholders == {"field": "Used Percent"}
+
+
+def test_resolve_translation_network_without_interface() -> None:
+    """A ``net`` payload without an interface tag uses the network_field key
+    with an empty interface placeholder."""
+    key, placeholders = resolve_translation("net", {"host": "h"}, "bytes_recv")
+    assert key == "network_field"
+    assert placeholders == {"field": "Bytes Received", "interface": ""}
+
+
+def test_resolve_translation_sensors_non_coretemp() -> None:
+    """A ``sensors`` payload that's not a coretemp CPU package uses the
+    generic sensor_field key."""
+    key, placeholders = resolve_translation(
+        "sensors", {"host": "h", "chip": "nvme-pci-0008", "feature": "composite"}, "temp_input"
+    )
+    assert key == "sensor_field"
+    assert placeholders == {"field": "Temperature"}
 
 
 def test_disk_measurement_resolves_diagnostic_regardless_of_case() -> None:
@@ -25,3 +92,20 @@ def test_lifecycle_load_and_process_fields_resolve_diagnostic_on_any_measurement
     # Plain user-facing counts stay uncategorized.
     assert resolve_entity_category("system", "n_users") is None
     assert resolve_entity_category("system", "load_average") is None
+
+
+def test_infer_icon_key_physical_classes() -> None:
+    assert infer_icon_key("any", "temp_input") == "temperature"
+    assert infer_icon_key("any", "voltage") == "voltage"
+    assert infer_icon_key("any", "energy_rate") == "power"
+    assert infer_icon_key("any", "energy") == "energy"
+    assert infer_icon_key("any", "fan_input") == "fan"
+
+
+def test_infer_icon_key_measurement_fallback() -> None:
+    assert infer_icon_key("cpu", "usage_idle") == "cpu"
+    assert infer_icon_key("mem", "used") == "memory"
+    assert infer_icon_key("disk", "free") == "disk"
+    assert infer_icon_key("net", "bytes_recv") == "network"
+    assert infer_icon_key("battery", "state") == "battery"
+    assert infer_icon_key("custom", "field") == "generic"

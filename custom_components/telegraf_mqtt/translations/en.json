@@ -7,7 +7,19 @@
           "topic_pattern": "MQTT topic pattern",
           "device_name": "Device name",
           "manufacturer": "Manufacturer",
-          "model": "Model"
+          "model": "Model",
+          "sw_version": "Software version"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Telegraf MQTT",
+        "description": "Update the MQTT subscription, device name, or device metadata. The integration will reload to apply changes.",
+        "data": {
+          "topic_pattern": "MQTT topic pattern",
+          "device_name": "Device name",
+          "manufacturer": "Manufacturer",
+          "model": "Model",
+          "sw_version": "Software version"
         }
       },
       "options": {
@@ -39,6 +51,40 @@
     "invalid_persisted_option": {
       "title": "Invalid Telegraf MQTT option(s)",
       "description": "The persisted value for {options} is invalid. The integration fell back to default values ({defaults}) so setup could complete. Open the integration\u0027s options dialog and correct the values, or remove and re-add the entry to reset the options to defaults."
+    }
+  },
+  "exceptions": {
+    "reconfigure_subscribe_failed": {
+      "message": "Could not subscribe to the new MQTT topic pattern {topic}: {error}. The integration kept the previous subscription."
+    },
+    "mqtt_broker_unreachable": {
+      "message": "Could not reach the MQTT broker to subscribe to {topic}: {error}. Home Assistant will keep retrying."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "cpu_package_temperature": "CPU Package Temperature",
+      "cpu_field": "CPU {field}",
+      "memory_field": "Memory {field}",
+      "disk_root_field": "Disk Root {field}",
+      "disk_field": "Disk {field}",
+      "network_field": "{interface} {field}",
+      "sensor_field": "Sensor {field}",
+      "gpu_field": "GPU {field}",
+      "battery_field": "Battery {field}",
+      "generic_field": "{field}"
+    },
+    "binary_sensor": {
+      "cpu_package_temperature": "CPU Package Temperature",
+      "cpu_field": "CPU {field}",
+      "memory_field": "Memory {field}",
+      "disk_root_field": "Disk Root {field}",
+      "disk_field": "Disk {field}",
+      "network_field": "{interface} {field}",
+      "sensor_field": "Sensor {field}",
+      "gpu_field": "GPU {field}",
+      "battery_field": "Battery {field}",
+      "generic_field": "{field}"
     }
   }
 }

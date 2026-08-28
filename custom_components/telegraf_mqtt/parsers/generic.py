@@ -5,10 +5,15 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from ..models import MetricDescriptor, MetricValue, frozen_tags
-from ..naming import resolve_entity_category, resolve_name
+from ..naming import (
+    infer_icon_key,
+    resolve_entity_category,
+    resolve_translation,
+)
 from .static import is_static_field
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,7 +24,13 @@ _TOTAL_INCREASING_FIELDS = {"bytes_recv", "bytes_sent", "uptime"}
 
 
 def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
-    """Parse a Telegraf JSON payload using generic fallback rules."""
+    """Parse a Telegraf JSON payload using generic fallback rules.
+
+    Phase 9: the resolved display ``name`` is no longer stored on the
+    descriptor. The parser sets ``translation_key`` and
+    ``translation_placeholders``; the entity layer reads them and HA
+    formats them via translations/en.json.
+    """
     measurement = payload.get("name")
     tags = payload.get("tags")
     fields = payload.get("fields")
@@ -31,7 +42,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
 
     try:
         timestamp_float = float(timestamp)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         _LOGGER.debug("Unsupported Telegraf payload shape")
         return []
 
@@ -46,6 +57,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
             _LOGGER.debug("Dropping unsupported Telegraf field %s.%s", measurement, field)
             continue
 
+        translation_key, placeholders = resolve_translation(measurement, clean_tags, field)
         descriptors.append(
             MetricDescriptor(
                 unique_key=build_unique_key(measurement, clean_tags, field),
@@ -54,7 +66,6 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 field=field,
                 value=value,
                 timestamp=timestamp_float,
-                name=resolve_name(measurement, clean_tags, field),
                 native_unit=infer_native_unit(field),
                 suggested_device_class=infer_device_class(measurement, field),
                 suggested_state_class=infer_state_class(field, value),
@@ -63,6 +74,8 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 # uptime_format, ...) is never cleaned up; everything else is AUTO.
                 cleanup_policy="NEVER" if is_static_field(measurement, field) else "AUTO",
                 device_id=clean_tags.get("host", ""),
+                translation_key=translation_key,
+                translation_placeholders=MappingProxyType(dict(placeholders)),
             )
         )
 
@@ -77,21 +90,13 @@ def build_unique_key(measurement: str, tags: Mapping[str, str], field: str) -> s
     return "_".join(_slugify(part) for part in parts if part)
 
 
-def build_fallback_name(measurement: str, tags: Mapping[str, str], field: str) -> str:
-    """Build the Phase 1 raw fallback name for a metric field."""
-    parts = [measurement]
-    parts.extend(value for key, value in sorted(tags.items()) if key != "host")
-    parts.append(field)
-    return " ".join(titleized for part in parts if part and (titleized := _titleize(part)))
-
-
 def infer_native_unit(field: str) -> str | None:
     """Infer a basic native unit from a field name."""
     field_lower = field.lower()
     if "percent" in field_lower or field_lower == "percentage":
         return "%"
     if "temp_input" in field_lower or "temp" in field_lower:
-        return "°C"
+        return "\u00b0C"
     if field_lower in {"bytes_recv", "bytes_sent"}:
         return "B"
     if "fan_input" in field_lower:
@@ -139,7 +144,3 @@ def _slugify(value: str) -> str:
         return "root"
     slug = _SLUG_RE.sub("_", value.lower()).strip("_")
     return slug or "unknown"
-
-
-def _titleize(value: str) -> str:
-    return " ".join(word.capitalize() for word in _SLUG_RE.split(value) if word)

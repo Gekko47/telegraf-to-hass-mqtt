@@ -137,7 +137,6 @@ def _descriptor(unique_key: str, value: Any = 1.0, measurement: str = "mem") -> 
         field="used_percent",
         value=value,
         timestamp=1721664000,
-        name="Mem Used Percent",
         native_unit=None,
         suggested_device_class=None,
         suggested_state_class="measurement",

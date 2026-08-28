@@ -96,6 +96,7 @@ class RuntimeData:
     manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
+    sw_version: str | None = None
 
 
 @dataclass
@@ -116,7 +117,6 @@ def _descriptor(unique_key: str, value, **overrides) -> MetricDescriptor:
         "field": unique_key,
         "value": value,
         "timestamp": 1721664000,
-        "name": unique_key.replace("_", " ").title(),
         "native_unit": None,
         "suggested_device_class": None,
         "suggested_state_class": None,

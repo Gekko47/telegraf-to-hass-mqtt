@@ -57,7 +57,6 @@ def _descriptor(
         field=field_name or unique_key,
         value=value,
         timestamp=1.0,
-        name=unique_key,
         native_unit=None,
         suggested_device_class=None,
         suggested_state_class="measurement",
@@ -700,13 +699,12 @@ async def test_signal_remove_metric_drops_only_the_target_entity(
     # The integration's default cleanup_delay is 30 days; shrink it
     # for this test so the battery is eligible on the same call. We
     # rewrite the candidate timestamp to "now - 2s" so the strict
-    # ``cleanup_delay`` check passes. The manager's per-registry
-    # ``_cleanup_delay`` was captured at construction time, so we
-    # patch both.
+    # ``cleanup_delay`` check passes. ``DeviceManager.apply_options``
+    # is the public propagation path -- it stores the new value at
+    # the manager level AND fans it out to every existing per-device
+    # registry, so we don't have to touch them individually here.
     manager = entry.runtime_data.manager
-    manager._cleanup_delay = 1
-    for registry in manager.devices.values():
-        registry._cleanup_delay = 1
+    manager.apply_options(cleanup_delay=1)
     battery_state.cleanup_candidate_since = now - 2
     # The device is ACTIVE (heartbeat fresh) and has at least one
     # available metric, so the min_active_metrics floor is met.

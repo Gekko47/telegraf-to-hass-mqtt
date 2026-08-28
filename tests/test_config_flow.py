@@ -92,6 +92,57 @@ async def test_config_flow_requires_device_name(hass) -> None:
     assert result["errors"] == {CONF_DEVICE_NAME: "required"}
 
 
+async def test_reconfigure_flow_rejects_invalid_topic(hass) -> None:
+    """The reconfigure step surfaces a form with ``invalid_topic`` error
+    when the user submits a syntactically invalid MQTT topic pattern."""
+    from homeassistant.config_entries import SOURCE_RECONFIGURE  # type: ignore[attr-defined]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Telegraf",
+        data={CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: "Telegraf"},
+        unique_id="telegraf/#",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_TOPIC_PATTERN: "telegraf/#/bad", CONF_DEVICE_NAME: "Telegraf"},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_TOPIC_PATTERN: "invalid_topic"}
+
+
+async def test_reconfigure_flow_requires_device_name(hass) -> None:
+    """The reconfigure step surfaces a form with ``required`` error
+    when the user submits an empty device name."""
+    from homeassistant.config_entries import SOURCE_RECONFIGURE  # type: ignore[attr-defined]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Telegraf",
+        data={CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: "Telegraf"},
+        unique_id="telegraf/#",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: ""},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {CONF_DEVICE_NAME: "required"}
+
+
 async def test_options_flow_saves_user_input(hass) -> None:
     entry = MockConfigEntry(
         domain=DOMAIN,

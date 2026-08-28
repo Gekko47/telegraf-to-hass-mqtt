@@ -25,6 +25,11 @@ from typing import Any
 import pytest
 
 import custom_components.telegraf_mqtt as integration
+from conftest import (
+    _install_sensor_stubs_and_reload,
+    _pop_integration_modules,
+    _restore_ha_stubs,
+)
 from custom_components.telegraf_mqtt.const import (
     CONF_DEVICE_NAME,
     CONF_TOPIC_PATTERN,
@@ -260,7 +265,6 @@ def _descriptor() -> MetricDescriptor:
         field="used_percent",
         value=41.2,
         timestamp=1721664000,
-        name="Memory Used Percent",
         native_unit=None,
         suggested_device_class=None,
         suggested_state_class="measurement",
@@ -268,77 +272,17 @@ def _descriptor() -> MetricDescriptor:
     )
 
 
-def test_entity_unique_id_is_domain_prefixed_and_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entity_unique_id_is_domain_prefixed_and_stable() -> None:
     """Every entity's ``_attr_unique_id`` must be prefixed with the domain so
     it is unique across the whole HA instance, and must match the v1-frozen
     ``{DOMAIN}_{device_id}_{unique_key}`` schema.
     """
-    import sys
-    import types
-    import enum
-    import importlib
-
-    # Stub HA so the platform module imports cleanly.
-    components = types.ModuleType("homeassistant.components")
-    sensor = types.ModuleType("homeassistant.components.sensor")
-    config_entries = types.ModuleType("homeassistant.config_entries")
-    const = types.ModuleType("homeassistant.const")
-    core = types.ModuleType("homeassistant.core")
-    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
-    dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
-    helpers = types.ModuleType("homeassistant.helpers")
-    entity_helpers = types.ModuleType("homeassistant.helpers.entity")
-
-    class StubEntity:
-        def __init__(self) -> None:
-            self.write_count = 0
-        def async_write_ha_state(self) -> None:
-            self.write_count += 1
-        def async_on_remove(self, _c) -> None:
-            self.remove_callback = lambda: None
-
-    class UnitOfTemperature:
-        CELSIUS = "°C"
-
-    def _cb(f): f.__hass_callback__ = True; return f
-    def _adc(_h, _s, _t): return lambda: None
-
-    class _EC(str, enum.Enum):
-        CONFIG = "config"
-        DIAGNOSTIC = "diagnostic"
-
-    sensor.SensorEntity = StubEntity
-    config_entries.ConfigEntry = object
-    const.UnitOfTemperature = UnitOfTemperature
-    core.HomeAssistant = object
-    core.callback = _cb
-    device_registry.DeviceInfo = dict
-    dispatcher.async_dispatcher_connect = _adc
-    entity_helpers.EntityCategory = _EC
-
-    saved = {n: sys.modules.get(n) for n in (
-        "homeassistant.components", "homeassistant.components.sensor",
-        "homeassistant.config_entries", "homeassistant.const",
-        "homeassistant.core", "homeassistant.helpers",
-        "homeassistant.helpers.device_registry", "homeassistant.helpers.dispatcher",
-        "homeassistant.helpers.entity",
-    )}
-    sys.modules["homeassistant.components"] = components
-    sys.modules["homeassistant.components.sensor"] = sensor
-    sys.modules["homeassistant.config_entries"] = config_entries
-    sys.modules["homeassistant.const"] = const
-    sys.modules["homeassistant.core"] = core
-    sys.modules["homeassistant.helpers"] = helpers
-    sys.modules["homeassistant.helpers.device_registry"] = device_registry
-    sys.modules["homeassistant.helpers.dispatcher"] = dispatcher
-    sys.modules["homeassistant.helpers.entity"] = entity_helpers
-    sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
-
+    sensor_mod = _install_sensor_stubs_and_reload()
     try:
-        sensor_mod = importlib.import_module("custom_components.telegraf_mqtt.sensor")
+        from custom_components.telegraf_mqtt.parser import TelegrafParser
         from custom_components.telegraf_mqtt.registry import DeviceManager
 
-        manager = DeviceManager(parser=__import__("custom_components.telegraf_mqtt.parser", fromlist=["TelegrafParser"]).TelegrafParser())
+        manager = DeviceManager(parser=TelegrafParser())
         registry = manager.get_or_create_registry("host1", "host1")
         registry.update(_descriptor())
 
@@ -346,11 +290,10 @@ def test_entity_unique_id_is_domain_prefixed_and_stable(monkeypatch: pytest.Monk
         class _E:
             runtime_data: Any
             entry_id: str = "entry-1"
-        from custom_components.telegraf_mqtt.parser import TelegrafParser as _TP
         e = _E(runtime_data=integration.TelegrafMqttRuntimeData(
             manager=manager,
-            parser=_TP(),
-            parser_stats=_TP().stats,
+            parser=TelegrafParser(),
+            parser_stats=TelegrafParser().stats,
             manufacturer=None,
             model=None,
         ))
@@ -359,12 +302,8 @@ def test_entity_unique_id_is_domain_prefixed_and_stable(monkeypatch: pytest.Monk
         # And the domain prefix is the actual DOMAIN constant, not a hardcode.
         assert entity._attr_unique_id.startswith(DOMAIN + "_")
     finally:
-        sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
-        for name, mod in saved.items():
-            if mod is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = mod
+        _pop_integration_modules()
+        _restore_ha_stubs()
 
 
 # ---------------------------------------------------------------------------

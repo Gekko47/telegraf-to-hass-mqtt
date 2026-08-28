@@ -15,15 +15,19 @@ the same HA-stub installer pattern as ``tests/test_platform_units.py`` so the
 from __future__ import annotations
 
 import asyncio
-import enum
 import importlib
 import inspect
 import json
-import sys
-import types
 from dataclasses import dataclass
 
 import pytest
+
+from conftest import (
+    _install_binary_sensor_stubs_and_reload,
+    _install_sensor_stubs_and_reload,
+    _pop_integration_modules,
+    _restore_ha_stubs,
+)
 
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parser import TelegrafParser
@@ -84,54 +88,56 @@ ALLOWED_COMBOS: frozenset[tuple[str | None, str | None, str | None]] = frozenset
 
 
 # Real-world representative Telegraf measurements (sourced from common plugin
-# sets, plus the 7 SPEC reference payloads). For each, the (measurement, field)
-# tuple is fed through ``infer_*`` to derive the actual (device_class,
-# state_class, native_unit) the pipeline will assign; the parametrized test
-# below asserts that combination lives in ALLOWED_COMBOS.
-REPRESENTATIVE_FIELDS: list[tuple[str, str]] = [
+# sets, plus the 7 SPEC reference payloads). Each entry is a
+# (measurement, field, probe_value) tuple: ``probe_value`` is the value fed to
+# ``infer_state_class`` -- ``True`` for boolean fields so the boolean branch
+# returns None, ``1`` for numerics so the default "measurement" path is
+# taken. The (measurement, field, probe_value) triple is fed through
+# ``infer_*`` to derive the actual (device_class, state_class, native_unit)
+# the pipeline will assign; the parametrized test below asserts that
+# combination lives in ALLOWED_COMBOS.
+REPRESENTATIVE_FIELDS: list[tuple[str, str, float | int | bool]] = [
     # From the 7 SPEC.md reference payloads.
-    ("cpu", "usage_idle"),
-    ("mem", "used_percent"),
-    ("mem", "used"),
-    ("disk", "used_percent"),
-    ("disk", "free"),
-    ("net", "bytes_recv"),
-    ("net", "bytes_sent"),
-    ("sensors", "temp_input"),
-    ("nvidia_gpu", "gpu_util"),
-    ("nvidia_gpu", "temp"),
-    ("nvidia_gpu", "mem_used"),
-    ("battery", "percentage"),
-    ("battery", "voltage"),
+    ("cpu", "usage_idle", 1),
+    ("mem", "used_percent", 1),
+    ("mem", "used", 1),
+    ("disk", "used_percent", 1),
+    ("disk", "free", 1),
+    ("net", "bytes_recv", 1),
+    ("net", "bytes_sent", 1),
+    ("sensors", "temp_input", 1),
+    ("nvidia_gpu", "gpu_util", 1),
+    ("nvidia_gpu", "temp", 1),
+    ("nvidia_gpu", "mem_used", 1),
+    ("battery", "percentage", 1),
+    ("battery", "voltage", 1),
     # Lifecycle/load/process fields (DIAGNOSTIC per SPEC.md).
-    ("system", "uptime"),
-    ("system", "load1"),
-    ("system", "load5"),
-    ("system", "load15"),
-    ("system", "processes_forked"),
-    ("system", "n_users"),
+    ("system", "uptime", 1),
+    ("system", "load1", 1),
+    ("system", "load5", 1),
+    ("system", "load15", 1),
+    ("system", "processes_forked", 1),
+    ("system", "n_users", 1),
     # Other Telegraf outputs commonly seen in the wild.
-    ("diskio", "read_bytes"),
-    ("diskio", "write_bytes"),
-    ("swap", "used_percent"),
-    ("swap", "used"),
-    ("mem", "available"),
-    ("mem", "total"),
-    ("processes", "total"),
-    ("processes", "running"),
-    ("cpu", "usage_user"),
+    ("diskio", "read_bytes", 1),
+    ("diskio", "write_bytes", 1),
+    ("swap", "used_percent", 1),
+    ("swap", "used", 1),
+    ("mem", "available", 1),
+    ("mem", "total", 1),
+    ("processes", "total", 1),
+    ("processes", "running", 1),
+    ("cpu", "usage_user", 1),
     # Boolean -- confirmed by infer_state_class returning None; the
     # (device_class, state_class, native_unit) tuple will be (None, None, None)
     # and the allowlist must permit it (binary sensors don't have a state_class).
-    # The test_combination_is_recorder_valid parametrize call below detects
-    # this entry and passes True explicitly so the boolean branch of
-    # infer_state_class is exercised instead of falling through to the
-    # default-int "measurement" path.
-    ("net", "link_up"),
+    # The probe value is stored alongside the (measurement, field) tuple so
+    # the boolean branch of infer_state_class is exercised directly.
+    ("net", "link_up", True),
     # More unit branches from ``infer_native_unit`` not in SPEC reference set.
-    ("ups", "battery_runtime"),
-    ("sensors", "fan1_input"),
-    ("smart", "energy_rate"),
+    ("ups", "battery_runtime", 1),
+    ("sensors", "fan1_input", 1),
+    ("smart", "energy_rate", 1),
 ]
 
 
@@ -272,21 +278,19 @@ def test_native_unit_propagates_to_sensor_entity_through_registry() -> None:
 
 
 @pytest.mark.parametrize(
-    "measurement,field",
+    "measurement,field,value",
     REPRESENTATIVE_FIELDS,
-    ids=[f"{m}.{f}" for m, f in REPRESENTATIVE_FIELDS],
+    ids=[f"{m}.{f}" for m, f, _v in REPRESENTATIVE_FIELDS],
 )
-def test_combination_is_recorder_valid(measurement: str, field: str) -> None:
+def test_combination_is_recorder_valid(measurement: str, field: str, value: float | int | bool) -> None:
     """Every combination the pipeline can assign must be in ALLOWED_COMBOS.
 
     Phase 4 exit criterion 2: verified valid for long-term statistics by test.
     """
-    # Boolean fields must be probed with a True value so infer_state_class
-    # returns None (the boolean branch) instead of falling through to the
-    # default-int "measurement" path. The list of known boolean Telegraf
-    # fields lives next to REPRESENTATIVE_FIELDS; keeping the mapping local
-    # avoids a new module-level constant for a single field.
-    value: float | int | bool = True if (measurement, field) == ("net", "link_up") else 1
+    # The probe ``value`` is supplied by REPRESENTATIVE_FIELDS: booleans are
+    # passed as ``True`` so ``infer_state_class`` takes the boolean branch
+    # (returning None), numeric fields as ``1`` so they fall through to the
+    # default "measurement" path. No field-name branching here.
     combination = _combination_for(measurement, field, value)
     assert combination in ALLOWED_COMBOS, (
         f"({measurement!r}, {field!r}) resolves to {combination}, "
@@ -460,7 +464,8 @@ def test_mixed_payload_routes_booleans_to_binary_and_numbers_to_sensor() -> None
 
 # ---------------------------------------------------------------------------
 # Stubs and harness-free platform setup (mirrors tests/test_platform_units.py
-# pattern; intentionally self-contained so this file is independent).
+# pattern; the HA stub installers themselves live in tests/conftest.py so the
+# Bronze test in test_phase5_bronze.py can reuse the same scaffolding).
 # ---------------------------------------------------------------------------
 
 
@@ -469,6 +474,7 @@ class _RuntimeData:
     manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
+    sw_version: str | None = None
 
 
 @dataclass
@@ -481,128 +487,6 @@ class _Entry:
 
     def async_on_unload(self, callback) -> None:
         self._unload_callbacks.append(callback)
-
-
-# --- Minimal HA stand-ins ---------------------------------------------------
-# Same spirit as tests/test_platform_units.py's ``_install_platform_stubs``,
-# but self-contained and snapshot-based: the first install remembers whatever
-# lived under homeassistant.* (real HA from .venv or another test's stubs) and
-# ``_restore_ha_stubs`` puts those originals back, so this file can never leak
-# its stand-ins into harness-based tests that run afterwards.
-
-_HA_MODULE_NAMES: tuple[str, ...] = (
-    "homeassistant.components",
-    "homeassistant.components.sensor",
-    "homeassistant.components.binary_sensor",
-    "homeassistant.config_entries",
-    "homeassistant.const",
-    "homeassistant.core",
-    "homeassistant.helpers",
-    "homeassistant.helpers.device_registry",
-    "homeassistant.helpers.dispatcher",
-    "homeassistant.helpers.entity",
-)
-
-_SAVED_HA_MODULES: dict[str, types.ModuleType | None] = {}
-
-
-def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
-    """Fresh stand-ins covering everything sensor.py / binary_sensor.py import."""
-    components = types.ModuleType("homeassistant.components")
-    sensor_mod = types.ModuleType("homeassistant.components.sensor")
-    binary_mod = types.ModuleType("homeassistant.components.binary_sensor")
-    config_entries = types.ModuleType("homeassistant.config_entries")
-    const = types.ModuleType("homeassistant.const")
-    core = types.ModuleType("homeassistant.core")
-    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
-    dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
-    helpers = types.ModuleType("homeassistant.helpers")
-
-    class StubEntity:
-        def __init__(self) -> None:
-            self.write_count = 0
-
-        def async_write_ha_state(self) -> None:
-            self.write_count += 1
-
-        def async_on_remove(self, remove_callback) -> None:
-            self.remove_callback = remove_callback
-
-    class UnitOfTemperature:
-        CELSIUS = "°C"
-
-    def callback(func):
-        func.__hass_callback__ = True
-        return func
-
-    def async_dispatcher_connect(_hass, _signal, target):
-        return lambda: None
-
-    sensor_mod.SensorEntity = StubEntity
-    binary_mod.BinarySensorEntity = StubEntity
-    config_entries.ConfigEntry = object
-    const.UnitOfTemperature = UnitOfTemperature
-    core.HomeAssistant = object
-    core.callback = callback
-    device_registry.DeviceInfo = dict
-    dispatcher.async_dispatcher_connect = async_dispatcher_connect
-
-    entity_helpers = types.ModuleType("homeassistant.helpers.entity")
-
-    class StubEntityCategory(str, enum.Enum):
-        CONFIG = "config"
-        DIAGNOSTIC = "diagnostic"
-
-    entity_helpers.EntityCategory = StubEntityCategory
-
-    return {
-        "homeassistant.components": components,
-        "homeassistant.components.sensor": sensor_mod,
-        "homeassistant.components.binary_sensor": binary_mod,
-        "homeassistant.config_entries": config_entries,
-        "homeassistant.const": const,
-        "homeassistant.core": core,
-        "homeassistant.helpers": helpers,
-        "homeassistant.helpers.device_registry": device_registry,
-        "homeassistant.helpers.dispatcher": dispatcher,
-        "homeassistant.helpers.entity": entity_helpers,
-    }
-
-
-def _install_ha_entity_stubs() -> None:
-    if not _SAVED_HA_MODULES:
-        for name in _HA_MODULE_NAMES:
-            _SAVED_HA_MODULES[name] = sys.modules.get(name)
-    for name, module in _build_ha_stub_modules().items():
-        sys.modules[name] = module
-
-
-def _restore_ha_stubs() -> None:
-    """Put back whatever the pre-test environment had under homeassistant.*."""
-    for name, saved in _SAVED_HA_MODULES.items():
-        if saved is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = saved
-
-
-def _install_sensor_stubs_and_reload():
-    """Install HA stubs and import a pristine sensor.py bound to them."""
-    _install_ha_entity_stubs()
-    sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
-    return importlib.import_module("custom_components.telegraf_mqtt.sensor")
-
-
-def _install_binary_sensor_stubs_and_reload():
-    """Install HA stubs and import a pristine binary_sensor.py bound to them."""
-    _install_ha_entity_stubs()
-    sys.modules.pop("custom_components.telegraf_mqtt.binary_sensor", None)
-    return importlib.import_module("custom_components.telegraf_mqtt.binary_sensor")
-
-
-def _pop_integration_modules() -> None:
-    sys.modules.pop("custom_components.telegraf_mqtt.sensor", None)
-    sys.modules.pop("custom_components.telegraf_mqtt.binary_sensor", None)
 
 
 def _setup_sensor_platform(sensor_module, manager, entry: _Entry, added: list) -> None:

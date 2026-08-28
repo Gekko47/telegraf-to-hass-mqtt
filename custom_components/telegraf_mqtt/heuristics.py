@@ -32,7 +32,7 @@ FIELD_ALIASES: dict[str, str] = {
     "free": "Free",
     "bytes_recv": "Bytes Received",
     "bytes_sent": "Bytes Sent",
-    "gpu_util": "GPU Utilization",
+    "gpu_util": "Utilization",
     "mem_used": "Memory Used",
     "percentage": "Percentage",
     "voltage": "Voltage",

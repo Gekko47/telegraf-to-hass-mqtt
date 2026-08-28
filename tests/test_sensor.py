@@ -76,6 +76,7 @@ class RuntimeData:
     manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
+    sw_version: str | None = None
 
 
 @dataclass
@@ -92,7 +93,6 @@ def _descriptor() -> MetricDescriptor:
         field="used_percent",
         value=41.2,
         timestamp=1721664000,
-        name="Memory Used Percent",
         native_unit=None,
         suggested_device_class=None,
         suggested_state_class="measurement",

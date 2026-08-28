@@ -171,6 +171,7 @@ class RuntimeData:
     manager: DeviceManager
     manufacturer: str | None = None
     model: str | None = None
+    sw_version: str | None = None
 
 
 @dataclass
@@ -194,7 +195,6 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
             field="link_up",
             value=True,
             timestamp=1721664000,
-            name="Link Up",
             native_unit=None,
             suggested_device_class=None,
             suggested_state_class=None,

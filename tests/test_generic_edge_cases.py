@@ -7,7 +7,6 @@ import json
 from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.parsers import base
 from custom_components.telegraf_mqtt.parsers.generic import (
-    build_fallback_name,
     build_unique_key,
     infer_device_class,
     infer_native_unit,
@@ -42,13 +41,6 @@ def test_generic_parser_drops_non_string_field_names() -> None:
     descriptors = parse_generic_payload({"name": "x", "tags": {"host": "h"}, "fields": {1: 5, "ok": 6}, "timestamp": 1})
 
     assert [descriptor.field for descriptor in descriptors] == ["ok"]
-
-
-def test_build_fallback_name_titleizes_measurement_tags_and_field() -> None:
-    """Raw fallback naming titleizes slugs; alias polish arrives in Phase 3."""
-    assert build_fallback_name("net", {"interface": "wlan0"}, "bytes_recv") == "Net Wlan0 Bytes Recv"
-    assert build_fallback_name("disk", {"path": "/"}, "free") == "Disk Free"
-    assert build_fallback_name("weird!!name", {}, "field_x") == "Weird Name Field X"
 
 
 def test_slugify_maps_root_path_and_blank_values() -> None:

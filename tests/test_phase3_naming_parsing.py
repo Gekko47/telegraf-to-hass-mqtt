@@ -15,6 +15,7 @@ import logging
 import pytest
 
 from custom_components.telegraf_mqtt.parser import TelegrafParser
+from custom_components.telegraf_mqtt.translations_strings import format_translation
 
 REFERENCE_PAYLOADS: list[dict] = [
     {"name": "cpu", "tags": {"host": "cachyos-gekko"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
@@ -56,31 +57,31 @@ REFERENCE_PAYLOADS: list[dict] = [
     },
 ]
 
-# (field, name, native_unit, suggested_device_class, entity_category) per reference payload.
+# (field, expected_name, native_unit, suggested_device_class, entity_category) per reference payload.
+# Names are produced by translations_strings.format_translation, which mirrors en.json.
 EXPECTED_NAMING: dict[str, list[tuple[str, str, str | None, str | None, str | None]]] = {
-    # usage_idle has no 'percent' substring; unit-heuristic rework is explicitly Phase 4.
-    "cpu": [("usage_idle", "Usage Idle", None, None, None)],
+    "cpu": [("usage_idle", "CPU Usage Idle", None, None, None)],
     "mem": [
-        ("used_percent", "Used Percent", "%", None, None),
-        ("used", "Used", None, None, None),
+        ("used_percent", "Memory Used Percent", "%", None, None),
+        ("used", "Memory Used", None, None, None),
     ],
     "disk": [
         ("used_percent", "Disk Root Used Percent", "%", None, "diagnostic"),
         ("free", "Disk Root Free", None, None, "diagnostic"),
     ],
     "net": [
-        ("bytes_recv", "Wlan0 Bytes Received", "B", None, None),
-        ("bytes_sent", "Wlan0 Bytes Sent", "B", None, None),
+        ("bytes_recv", "wlan0 Bytes Received", "B", None, None),
+        ("bytes_sent", "wlan0 Bytes Sent", "B", None, None),
     ],
     "sensors": [("temp_input", "CPU Package Temperature", "\u00b0C", "temperature", None)],
     "nvidia_gpu": [
         ("gpu_util", "GPU Utilization", None, None, None),
-        ("temp", "Temperature", "\u00b0C", "temperature", None),
-        ("mem_used", "Memory Used", None, None, None),
+        ("temp", "GPU Temperature", "\u00b0C", "temperature", None),
+        ("mem_used", "GPU Memory Used", None, None, None),
     ],
     "battery": [
-        ("percentage", "Discharging Percentage", "%", "battery", None),
-        ("voltage", "Discharging Voltage", "V", "voltage", None),
+        ("percentage", "Battery Percentage", "%", "battery", None),
+        ("voltage", "Battery Voltage", "V", "voltage", None),
     ],
 }
 
@@ -98,7 +99,10 @@ def test_reference_payload_names_and_metadata(measurement: str) -> None:
     assert sorted(by_field) == sorted(expected_fields)
     for field, name, unit, device_class, category in EXPECTED_NAMING[measurement]:
         descriptor = by_field[field]
-        assert descriptor.name == name, field
+        rendered = format_translation(
+            descriptor.translation_key, dict(descriptor.translation_placeholders)
+        )
+        assert rendered == name, field
         assert descriptor.native_unit == unit, field
         assert descriptor.suggested_device_class == device_class, field
         assert descriptor.entity_category == category, field
@@ -117,7 +121,10 @@ def test_unknown_measurement_falls_back_to_generic_without_raising(caplog) -> No
     with caplog.at_level(logging.DEBUG, logger="custom_components.telegraf_mqtt.parser"):
         descriptors = parser.parse(json.dumps(payload))
 
-    assert [(d.field, d.value, d.name) for d in descriptors] == [("watts", 12.5, "Watts")]
+    assert [
+        (d.field, d.value, format_translation(d.translation_key, dict(d.translation_placeholders)))
+        for d in descriptors
+    ] == [("watts", 12.5, "Watts")]
     fallback_records = [r for r in caplog.records if "custom_plugin" in r.getMessage()]
     assert fallback_records
     assert all(r.levelno == logging.DEBUG for r in fallback_records)

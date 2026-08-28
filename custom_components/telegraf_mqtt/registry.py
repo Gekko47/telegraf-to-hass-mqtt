@@ -146,12 +146,14 @@ class MetricRegistry:
             field=descriptor.field,
             value=descriptor.value,
             timestamp=descriptor.timestamp,
-            name=descriptor.name,
             native_unit=override.get("native_unit", descriptor.native_unit),
             suggested_device_class=override.get("device_class", descriptor.suggested_device_class),
             suggested_state_class=override.get("state_class", descriptor.suggested_state_class),
             entity_category=override.get("entity_category", descriptor.entity_category),
             cleanup_policy=descriptor.cleanup_policy,
+            device_id=descriptor.device_id,
+            translation_key=descriptor.translation_key,
+            translation_placeholders=descriptor.translation_placeholders,
         )
 
     def update(
@@ -435,8 +437,8 @@ class DeviceManager:
                 expire_after=expire_after,
                 exclude_patterns=exclude_patterns,
                 field_overrides=field_overrides,
-                cleanup_delay=cleanup_delay,
-                delete_delay=delete_delay,
+                cleanup_delay=self._cleanup_delay,
+                delete_delay=self._delete_delay,
                 on_write=(
                     None
                     if on_write is None

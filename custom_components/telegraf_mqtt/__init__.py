@@ -54,6 +54,11 @@ from .const import (
     SIGNAL_NEW_METRIC,
     SIGNAL_REMOVE_METRIC,
 )
+from .exceptions import (
+    MqttBrokerUnreachable,
+    ReconfigureSubscribeFailed,
+    TelegrafMqttException,
+)
 from .parser import ParserStats, TelegrafParser
 from .registry import DeviceManager
 from .repairs import (
@@ -75,8 +80,27 @@ class TelegrafMqttRuntimeData:
     parser_stats: Any  # ``custom_components.telegraf_mqtt.parser.ParserStats``
     manufacturer: str | None
     model: str | None
+    sw_version: str | None = None
     unsubscribe: Callable[[], None] | None = None
     cancel_expiry: Callable[[], None] | None = None
+
+
+def MqttBrokerUnreachable(topic: str, error: str) -> ConfigEntryNotReady:
+    """Build a ``ConfigEntryNotReady`` for an unreachable MQTT broker.
+
+    Shared by the probe and real subscription error paths in
+    ``async_setup_entry`` so the toast text, translation domain/key, and
+    topic/error placeholders stay in sync. The caller is responsible for
+    raising the result with ``raise ... from <err>`` to preserve exception
+    chaining.
+    """
+    ready_exc = ConfigEntryNotReady(
+        f"Could not subscribe to {topic}: {error}"
+    )
+    ready_exc.translation_domain = DOMAIN
+    ready_exc.translation_key = "mqtt_broker_unreachable"
+    ready_exc.translation_placeholders = {"topic": topic, "error": error}
+    return ready_exc
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -105,6 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         parser_stats=parser_stats,
         manufacturer=entry.data.get("manufacturer"),
         model=entry.data.get("model"),
+        sw_version=entry.data.get("sw_version"),
     )
 
     if mqtt is not None:
@@ -134,9 +159,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass, topic_pattern, _on_probe_message
             )
         except Exception as probe_err:  # noqa: BLE001 - broker errors vary, surface uniformly
-            raise ConfigEntryNotReady(
-                f"Could not subscribe to {topic_pattern}: {probe_err}"
-            ) from probe_err
+            # Phase 9: ConfigEntryNotReady accepts translation_domain +
+            # translation_key + translation_placeholders for the toast.
+            raise MqttBrokerUnreachable(topic_pattern, str(probe_err)) from probe_err
         probe_unsubscribe()
         _LOGGER.debug(
             "MQTT subscribe probe OK for %s; installing real subscription", topic_pattern
@@ -147,9 +172,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass, topic_pattern, message_received
             )
         except Exception as real_err:  # pragma: no cover - the probe guards broker reachability; this arm is only reachable on a connection drop between SUBSCRIBE-ACKs
-            raise ConfigEntryNotReady(
-                f"Could not subscribe to {topic_pattern}: {real_err}"
-            ) from real_err
+            raise MqttBrokerUnreachable(topic_pattern, str(real_err)) from real_err
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
 
     if Platform is not None:

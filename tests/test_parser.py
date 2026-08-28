@@ -6,6 +6,7 @@ from types import MappingProxyType
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
+from custom_components.telegraf_mqtt.translations_strings import format_translation
 
 REFERENCE_PAYLOADS = [
     {"name": "cpu", "tags": {"host": "cachyos-gekko"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
@@ -122,7 +123,7 @@ def test_measurement_specific_naming_and_profile_categories() -> None:
         )
     )
 
-    assert [descriptor.name for descriptor in sensors_descriptors] == ["CPU Package Temperature"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in sensors_descriptors] == ["CPU Package Temperature"]
     assert sensors_descriptors[0].entity_category is None
     assert disk_descriptors[0].entity_category == "diagnostic"
 
@@ -151,8 +152,8 @@ def test_name_resolution_excludes_host_leakage_and_resolves_field_aliases() -> N
         )
     )
 
-    assert [descriptor.name for descriptor in cpu_descriptors] == ["Usage Idle"]
-    assert [descriptor.name for descriptor in mem_descriptors] == ["Used Percent", "Used"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == ["CPU Usage Idle"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in mem_descriptors] == ["Memory Used Percent", "Memory Used"]
 
 
 def test_name_resolution_normalizes_tag_value_whitespace_and_case_for_alias_lookup() -> None:
@@ -169,7 +170,7 @@ def test_name_resolution_normalizes_tag_value_whitespace_and_case_for_alias_look
         )
     )
 
-    assert [descriptor.name for descriptor in cpu_descriptors] == ["CPU Total Usage Idle"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == ["CPU Usage Idle"]
 
 
 def test_parser_drops_invalid_json_and_unsupported_field_shapes() -> None:

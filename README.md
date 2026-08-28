@@ -1,28 +1,32 @@
 # Telegraf MQTT for Home Assistant
 
-A Home Assistant custom integration that subscribes to MQTT topics, parses Telegraf JSON payloads, and exposes the resulting metric stream as Home Assistant sensor and binary sensor entities.
+A Home Assistant custom integration that subscribes to MQTT topics, parses Telegraf JSON payloads, and exposes the resulting metric stream as Home Assistant sensor and binary sensor entities. One HA device per physical PC, fully translated, no YAML.
 
 ## Overview
 
 This integration is designed for the Telegraf-to-Home-Assistant MQTT flow:
 
-- Telegraf publishes JSON payloads over MQTT
-- the integration receives those messages
-- the parser creates immutable metric descriptors
-- the registry deduplicates, tracks availability, and applies live overrides
-- the sensor and binary sensor platforms project the resolved state into Home Assistant
+- Telegraf publishes JSON payloads over MQTT (the `mqtt` output plugin with the JSON serializer).
+- The integration receives those messages via the official Home Assistant `mqtt` integration.
+- The parser creates immutable metric descriptors with translation keys + placeholders (no hardcoded English strings).
+- The registry deduplicates, tracks availability, and applies live overrides.
+- The sensor and binary sensor platforms project the resolved state into Home Assistant.
+- Every entity is grouped under a per-host device (`DeviceInfo`).
 
 ## Features
 
 - MQTT topic-pattern subscription
-- Parser-level metric descriptor construction
+- Parser-level metric descriptor construction with translation keys
 - Generic fallback parsing with measurement-aware naming support
 - Registry-backed deduplication and liveness tracking
 - Live options updates for expiry, exclusions, and field overrides
 - Sensor entities for numeric metrics
 - Binary sensor entities for boolean metrics
-- Config flow and options flow support
-- HACS-ready packaging metadata and translation strings
+- Config flow, options flow, and reconfigure flow (all UI, no YAML)
+- Translatable entities, exceptions, and config forms
+- HACS-ready packaging metadata
+- Repairs for overlapping topic patterns and invalid persisted options
+- Diagnostics download (redacted)
 
 ## Installation
 
@@ -69,73 +73,248 @@ entities, devices, and configuration are preserved across upgrades.
 3. Manual install: also remove the `custom_components/telegraf_mqtt` directory.
 4. If orphaned entries remain, remove only the Telegraf MQTT entries from the
    entity registry. Back up Home Assistant before any manual registry edit.
+
 ## Configure
 
 After installation:
 
-1. Open Settings → Devices & Services.
+1. Open Settings -> Devices & Services.
 2. Add Integration.
 3. Select `Telegraf MQTT`.
 4. Provide:
    - `topic_pattern` such as `telegraf/#`
    - `device_name`
-   - optional `manufacturer` and `model`
+   - optional `manufacturer`, `model`, `sw_version`
 
-The integration also supports an options flow (Settings → Devices & Services → Telegraf MQTT
-→ Configure) for live updates without removing the entry. Every option is documented below.
+The integration also supports an options flow (Settings -> Devices & Services -> Telegraf MQTT
+-> Configure) for live updates without removing the entry. Every option is documented below.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `exclude_patterns` | list of strings | `[]` | Glob patterns matched against each metric's `unique_key`; matching metrics are **not** created. Example: `["mem_*", "swap_*"]`. |
-| `field_overrides` | dict of `field → {key: value}` | `{}` | Override metadata per field, layered on top of the built-in heuristics. Supported keys: `native_unit`, `device_class`, `state_class`, `entity_category`. Example: `{"used_percent": {"native_unit": "%"}}`. |
-| `expire_after` | integer (seconds) | `120` | How long a metric may go without an update before it is marked **unavailable**. Recovery is immediate on the next message. |
-| `enable_cleanup` | boolean | `true` | Whether stale metrics are eligible for automatic cleanup. Disable for a pure “discovery + expiry” integration that never deletes a metric. Enabled requires the two delays below. |
-| `cleanup_delay` | integer (seconds) | `30 days` | How long a metric must remain a cleanup *candidate* (stale) before it is eligible for removal. |
-| `delete_delay` | integer (seconds) | `60 days` | Reserved for the removal phase (how long before a candidate is actually deleted). |
-| `min_active_metrics` | integer | `1` | Minimum number of metrics a device must have before any cleanup may empty it — protects a briefly-offline device from being stripped. `0` disables the guard. |
+| `field_overrides` | dict of `field → {key: value}` | `{}` | Override metadata per field, layered on top of the built-in heuristics. Supported keys: `native_unit`, `device_class`, `state_class`, `entity_category`. |
+| `expire_after` | int seconds | `120` | Time after the last message before a metric is marked unavailable. |
+| `enable_cleanup` | bool | `True` | When on, stale metrics (unavailable for `cleanup_delay`) are removed. |
+| `cleanup_delay` | int seconds | `2592000` (30 days) | How long a metric must be unavailable before cleanup considers it. |
+| `delete_delay` | int seconds | `5184000` (60 days) | How long an empty device must stay empty before it is removed. |
+| `min_active_metrics` | int | `1` | Cleanup is a no-op for a device with fewer than this many active metrics. |
 
-All numeric options coerce safely: a corrupted persisted value (for example `expire_after="abc"`)
-falls back to its documented default and raises a **Repairs** issue so you can correct it from the UI
-instead of the entry failing to set up.
+The options flow coerces invalid persisted values to the documented default and raises
+a Repairs issue so the user can correct them from the UI without the entry failing to
+set up.
 
-## Supported payload model
+### Reconfigure
 
-The parser consumes Telegraf-style JSON payloads shaped like:
+Settings -> Devices & Services -> **Telegraf MQTT** -> ... -> **Reconfigure** opens a
+form to change the topic pattern, device name, manufacturer, model, or software version
+without removing and re-adding the entry. The integration reloads the config entry to
+swap the MQTT subscription; the previous subscription is unsubscribed cleanly during
+unload. Re-configuring to a topic pattern already used by another entry aborts with a
+duplicate-topic error.
+
+## Reference
+
+This section documents what the integration supports, what it doesn't, how data arrives,
+and what to do when something looks wrong.
+
+### Data update
+
+The integration is `local_push` — entities update on the next Telegraf message.
+The integration never polls.
+
+What triggers a state write:
+
+- The value of a metric changed compared to the last received value.
+- The availability flipped (Active <-> Unavailable). The transition is logged once
+  at DEBUG (INFO or below) per flip, so repeated expiry ticks never spam the log.
+- A new metric is discovered on an already-known device (new entity, new state).
+
+What does **not** trigger a state write:
+
+- A re-received identical value (the registry detects no real change).
+- A timestamp-only update on the same value (the registry detects no real change).
+- An excluded metric (it's never inserted into the registry, so it can never
+  emit a signal).
+
+Expiry is a periodic timer (interval = `min(expire_after, 30)` seconds). At each
+tick the registry flips a metric to unavailable if `now - last_updated >
+expire_after`. Recovery is immediate on the next matching message.
+
+### Supported devices
+
+The integration accepts any Telegraf output. It does not care about the host OS
+or Telegraf version, only that the message is valid JSON of the documented shape
+(see `SPEC.md` for the wire format). In practice, anything that can run a
+Telegraf agent with the `mqtt` output plugin and the JSON serializer works.
+
+Common measurement names and the Telegraf input plugin they typically come from:
+
+| Measurement | Typical input plugin | Notes |
+|---|---|---|
+| `cpu` | `cpu` | `cpu-total` aggregates the whole CPU; per-core metrics arrive when per-CPU reporting is enabled. |
+| `mem` | `mem` | Percentage fields are state class `measurement`; byte counts are `total_increasing`. |
+| `disk` | `disk` | Whole measurement is diagnostic. The root disk is rendered as `Disk Root <field>`. |
+| `diskio` | `diskio` | Counters. |
+| `net` | `net` | Disambiguated by the `interface` tag. |
+| `sensors` | `lm_sensors` | Disambiguated by `chip` + `feature`. CPU package temperature is rendered as `CPU Package Temperature`. |
+| `system` | `system` | `n_cpus`, `n_users`, `uptime_format` are static identity. |
+| `processes` | `processes` | Process counts, always diagnostic. |
+| `swap` | `swap` | Similar shape to `mem`. |
+| `nvidia_gpu` | `nvidia-smi` (via Telegraf's exec input) | Field names vary by exec script. |
+| `battery` | `exec`/`upower` (custom) | Field names vary. |
+
+Unknown measurement names fall back to the generic parser and use the
+`generic_field` translation key. The user sees `<Title-cased Field Name>` in
+English, or the localised equivalent.
+
+### Supported functions
+
+The integration ships two entity platforms:
+
+- `sensor` — every numeric (int / float) field becomes a `sensor` entity.
+- `binary_sensor` — every boolean field becomes a `binary_sensor` entity.
+
+What the integration does **not** ship:
+
+- **No derived / computed sensors.** Calculated values (usage percentage from two
+  fields, duration formatting, rate-of-change) should use Home Assistant's
+  built-in Template Helpers — see
+  [Template integration](https://www.home-assistant.io/integrations/template/).
+- **No Number / Select / Switch platforms.** v1 is sensor + binary_sensor only.
+- **No services or device triggers.** v1 is read-only telemetry.
+
+The parser is platform-agnostic: the `MetricDescriptor` is the contract, and
+extending with new entity platforms is a platform-only change.
+
+### Examples
+
+**Example 1 — a CPU usage metric on a Linux host**
+
+Telegraf publishes:
 
 ```json
 {
   "name": "cpu",
-  "tags": {
-    "host": "host-name"
-  },
-  "fields": {
-    "usage_idle": 88.4
-  },
+  "tags": {"host": "cachyos-gekko", "cpu": "cpu-total"},
+  "fields": {"usage_idle": 88.4, "usage_user": 7.1},
   "timestamp": 1721664000
 }
 ```
 
-The parser preserves the measurement, tags, field name, and value as an immutable descriptor object. That preserves the integration’s separation of concerns between parsing, registry state, and entity projection.
+Result:
 
-## Entity behavior
+- A device is auto-created under the entry's `device_name` with `manufacturer`,
+  `model`, and `sw_version` from the config flow.
+- One sensor entity per field:
+  - `sensor.cachyos_gekko_cpu_cpu_total_usage_idle` — `CPU CPU Total Usage Idle`
+    (icon: `mdi:cpu-64-bit`), unit inferred as none, state class `measurement`.
+  - `sensor.cachyos_gekko_cpu_cpu_total_usage_user` — `CPU CPU Total Usage User`.
 
-### Sensors
+**Example 2 — a disk usage metric (diagnostic, disabled by default)**
 
-Numeric metrics are projected as Home Assistant `sensor` entities.
+```json
+{
+  "name": "disk",
+  "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+  "fields": {"used_percent": 63.5, "free": 128849018880},
+  "timestamp": 1721664000
+}
+```
 
-### Binary sensors
+Result:
 
-Boolean metrics are projected as Home Assistant `binary_sensor` entities.
+- Two sensor entities, both **disabled by default** (disk is diagnostic):
+  - `sensor.cachyos_gekko_disk_root_used_percent` — `Disk Root Used Percent`
+    (icon: `mdi:harddisk`), unit `%`, entity category `diagnostic`, **off by default**.
+  - `sensor.cachyos_gekko_disk_ext4_root_free` — `Disk Root Free`, unit none.
+- Enable them from Settings -> Devices & Services -> Entities -> select each entity
+  -> "Enable entity".
 
-This split is automatic: any Telegraf field whose value is a boolean (for
-example `link_up` in a `net` measurement) becomes a `binary_sensor` entity,
-while every numeric field stays on the `sensor` platform. No per-field
-configuration is required.
+**Example 3 — a battery binary sensor**
 
-Units are stored exactly as Telegraf reports them — byte counters remain raw
-byte counts (`B`), never converted to KB/MB/GB — and each entity carries the
-device class / state class pair Home Assistant's recorder accepts for
-long-term statistics.
+```json
+{
+  "name": "battery",
+  "tags": {"host": "cachyos-gekko", "state": "discharging"},
+  "fields": {"percentage": 87.0, "voltage": 11.4},
+  "timestamp": 1721664000
+}
+```
+
+Result:
+
+- A `binary_sensor` for the boolean field if the measurement contains one.
+- Two sensors for the numeric fields:
+  - `sensor.cachyos_gekko_battery_discharging_percentage` — `Battery Percentage`,
+    device class `battery`.
+  - `sensor.cachyos_gekko_battery_discharging_voltage` — `Battery Voltage`,
+    device class `voltage`.
+
+### Use cases
+
+- **Single-server monitor** — one Telegraf agent on the host running Home Assistant.
+  Add the integration once with `topic_pattern: telegraf/#` and all metrics appear
+  under one device.
+- **Multi-host fleet dashboard** — many Telegraf agents, all publishing to the same
+  MQTT topic tree. A single config entry subscribes to the union pattern; the
+  integration creates one device per host automatically (no restart, no reload).
+- **Laptop-on-the-go** — Telegraf publishes the hostname as the `host` tag. The
+  integration creates a device the first time the laptop is seen and cleans it up
+  after `delete_delay` of inactivity.
+- **Prometheus-style post-processing** — use Home Assistant's `statistics` integration
+  and Template Helpers on top of the sensor entities for long-term retention, rates,
+  and aggregations.
+
+### Known limitations
+
+- **No derived sensors in the integration.** Use Template Helpers instead.
+- **No MQTT client of the integration's own.** You must configure the official `mqtt`
+  integration; this integration only subscribes to MQTT topics through it.
+- **No per-measurement auth.** All Telegraf messages on the topic pattern are
+  treated as trusted.
+- **No services, no device triggers.** v1 is read-only telemetry.
+- **Offline devices are kept.** The integration never removes a device that has
+  at least one metric; it only marks the affected entities unavailable. Empty +
+  aged devices (`delete_delay`) are pruned (Stale Devices).
+- **No reconnection logic of its own.** When the broker drops, the official
+  `mqtt` integration auto-resubscribes; this integration's subscription rides on
+  top.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Entities show "unavailable" | Telegraf stopped publishing, or `expire_after` is too short for your update interval | Raise `expire_after` in the options flow. Verify with `mosquitto_sub` that messages still arrive. |
+| Duplicate entities appearing | Two config entries subscribed to overlapping topic patterns | Open Repairs -> "Overlapping topic patterns" -> change one pattern so they cover distinct streams. |
+| No entities at all | (a) Telegraf is not using the JSON serializer, (b) the topic pattern doesn't match, (c) the broker isn't connected | Verify with `mosquitto_sub -t 'telegraf/#' -v` that messages arrive. Confirm the config-flow topic matches. |
+| An entity I expect is missing | The `unique_key` matches one of your `exclude_patterns` globs | Open the options dialog, clear `exclude_patterns`, save. |
+| Options dialog rejects my number | Persisted value is non-numeric / negative | Open Repairs -> "Invalid Telegraf MQTT option(s)" -> correct the value. |
+| Reconfigure doesn't take effect | The new topic pattern matches another entry's pattern | Open Repairs -> "Overlapping topic patterns" -> pick a distinct pattern. |
+| Diagnostics show only the broker config | Integration hasn't seen any messages yet | Wait for at least one Telegraf message, then re-download. |
+| Entities are off by default | They are diagnostic (disk, system, lifecycle) | Open Settings -> Devices & Services -> Entities, enable the ones you want. |
+
+### Entity behavior
+
+- **Display name** is fully translation-driven. Every entity carries a
+  `translation_key` and `translation_placeholders`; Home Assistant renders the
+  localised string. There are no hardcoded English strings in the entity layer.
+- **Icon** is set per-entity from the descriptor's inferred icon key, mapped to
+  Material Design Icons (`mdi:cpu-64-bit`, `mdi:memory`, `mdi:harddisk`, …).
+- **Device class** (sensor entities only) is inferred from the field name (`temperature`, `voltage`,
+  `power`, `energy`, `battery`) and may be overridden via the
+  `field_overrides` option. Binary sensor entities do not get a device class
+  from the parser.
+- **State class** (sensor entities only) is `total_increasing` for byte counters and uptime,
+  `measurement` for everything else numeric, and unset for boolean / string
+  fields. Binary sensor entities do not carry a state class.
+- **Unit** is taken from the parser's heuristic and may be overridden via
+  `field_overrides`.
+- **Entity category** is `diagnostic` for disk usage, system identity,
+  uptime, boot time, load averages, and process counts. All other entities
+  have no category.
+- **Disabled by default** — entities whose `entity_category == diagnostic`
+  are added to the entity registry as disabled. Enable them per-entity from
+  Settings -> Devices & Services -> Entities.
 
 ## Architecture
 
@@ -145,7 +324,7 @@ The integration uses a layered model:
 2. Telegraf JSON parser layer
 3. `MetricDescriptor` contract layer
 4. Registry layer for deduplication and availability tracking
-5. Entity layer for sensor/binary sensor projection
+5. Entity layer for sensor / binary sensor projection
 
 The parser layer remains decoupled from Home Assistant entity implementation details.
 
@@ -158,27 +337,31 @@ The repository uses a local pytest-based regression suite.
 ```powershell
 .\.venv\Scripts\python -m pytest -q
 ```
+
 ### Coverage
 
 The suite runs with a **100% line-coverage gate** on `custom_components/telegraf_mqtt`
-(the stated floor is ≥90%; the current measured floor is 100%). Verify the gate on every
+(the stated floor is >=90%; the current measured floor is 100%). Verify the gate on every
 change with:
 
 ```powershell
-.\\.venv\\Scripts\\python -m pytest --cov=custom_components.telegraf_mqtt --cov-report=term-missing --no-cov-on-fail
+.\.venv\Scripts\python -m pytest --cov=custom_components.telegraf_mqtt --cov-report=term-missing --no-cov-on-fail
 ```
-
-
 
 ### Main implementation areas
 
 - `custom_components/telegraf_mqtt/parser.py` — JSON payload dispatch
 - `custom_components/telegraf_mqtt/parsers/` — measurement-specific parser entrypoints and generic fallback behavior
-- `custom_components/telegraf_mqtt/naming.py` — phase-aware naming and entity metadata resolution
+- `custom_components/telegraf_mqtt/naming.py` — translation-key, category, and icon-key resolution
+- `custom_components/telegraf_mqtt/icons.py` — MDI icon table
+- `custom_components/telegraf_mqtt/translations_strings.py` — in-process English translator mirror
+- `custom_components/telegraf_mqtt/exceptions.py` — translatable exceptions
 - `custom_components/telegraf_mqtt/registry.py` — registry state, deduplication, and live options application
 - `custom_components/telegraf_mqtt/sensor.py` — numeric metric entity projection
 - `custom_components/telegraf_mqtt/binary_sensor.py` — boolean metric entity projection
-- `custom_components/telegraf_mqtt/config_flow.py` — config and options UI flow
+- `custom_components/telegraf_mqtt/config_flow.py` — config, options, and reconfigure UI flow
+- `custom_components/telegraf_mqtt/diagnostics.py` — diagnostics download (redacted)
+- `custom_components/telegraf_mqtt/repairs.py` — Repairs issues
 
 ## Roadmap alignment
 

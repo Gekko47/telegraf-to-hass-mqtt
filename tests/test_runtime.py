@@ -88,7 +88,6 @@ def _descriptor(unique_key: str = "mem_used_percent", value: float = 41.2) -> Me
         field="used_percent",
         value=value,
         timestamp=1721664000,
-        name="Memory Used Percent",
         native_unit=None,
         suggested_device_class=None,
         suggested_state_class="measurement",
