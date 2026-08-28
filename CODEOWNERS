@@ -1,0 +1,4 @@
+# Home Assistant integration ownership (Silver rule: integration-owner).
+# Matches manifest.json "codeowners" and the GitHub owner of this repository.
+# Every change to the integration or its tests requires review by the owner.
+* @Gekko47

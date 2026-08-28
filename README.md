@@ -28,15 +28,39 @@ This integration is designed for the Telegraf-to-Home-Assistant MQTT flow:
 
 ### HACS
 
-1. Add this repository as a custom repository in HACS.
+1. Add this repository as a custom repository in HACS:
+
+   ```
+   https://github.com/Gekko47/telegraf-to-hass-mqtt
+   ```
+
 2. Search for `Telegraf MQTT`.
 3. Install the integration.
 4. Restart Home Assistant.
 
+See the [HACS custom repository documentation](https://www.hacs.xyz/docs/use/download/download/#to-download-a-custom-repository)
+for how to add a repository outside the default HACS list.
+
 ### Manual installation
 
-1. Copy the `custom_components/telegraf_mqtt` directory into your Home Assistant `custom_components` directory.
+1. Copy the `custom_components/telegraf_mqtt` directory into your Home Assistant
+   `custom_components` directory.
 2. Restart Home Assistant.
+
+### Requirements
+
+- Home Assistant **2026.6.x or newer** (auto-detected; not a HACS release, so it
+  updates in place from the repo).
+- The official Home Assistant [`mqtt`](https://www.home-assistant.io/integrations/mqtt/)
+  integration configured and connected to your broker (this integration uses it and
+  adds no MQTT client of its own).
+- No other Python dependencies are required.
+
+### Upgrade
+
+Because the integration is installed from a repository (HACS) or manually, upgrade by
+updating from HACS or re-copying the directory, then restarting Home Assistant. Existing
+entities, devices, and configuration are preserved across upgrades.
 
 ## Removal
 
@@ -57,11 +81,22 @@ After installation:
    - `device_name`
    - optional `manufacturer` and `model`
 
-The integration also supports an options flow for:
+The integration also supports an options flow (Settings → Devices & Services → Telegraf MQTT
+→ Configure) for live updates without removing the entry. Every option is documented below.
 
-- `exclude_patterns`
-- `field_overrides`
-- `expire_after`
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `exclude_patterns` | list of strings | `[]` | Glob patterns matched against each metric's `unique_key`; matching metrics are **not** created. Example: `["mem_*", "swap_*"]`. |
+| `field_overrides` | dict of `field → {key: value}` | `{}` | Override metadata per field, layered on top of the built-in heuristics. Supported keys: `native_unit`, `device_class`, `state_class`, `entity_category`. Example: `{"used_percent": {"native_unit": "%"}}`. |
+| `expire_after` | integer (seconds) | `120` | How long a metric may go without an update before it is marked **unavailable**. Recovery is immediate on the next message. |
+| `enable_cleanup` | boolean | `true` | Whether stale metrics are eligible for automatic cleanup. Disable for a pure “discovery + expiry” integration that never deletes a metric. Enabled requires the two delays below. |
+| `cleanup_delay` | integer (seconds) | `30 days` | How long a metric must remain a cleanup *candidate* (stale) before it is eligible for removal. |
+| `delete_delay` | integer (seconds) | `60 days` | Reserved for the removal phase (how long before a candidate is actually deleted). |
+| `min_active_metrics` | integer | `1` | Minimum number of metrics a device must have before any cleanup may empty it — protects a briefly-offline device from being stripped. `0` disables the guard. |
+
+All numeric options coerce safely: a corrupted persisted value (for example `expire_after="abc"`)
+falls back to its documented default and raises a **Repairs** issue so you can correct it from the UI
+instead of the entry failing to set up.
 
 ## Supported payload model
 
@@ -123,6 +158,17 @@ The repository uses a local pytest-based regression suite.
 ```powershell
 .\.venv\Scripts\python -m pytest -q
 ```
+### Coverage
+
+The suite runs with a **100% line-coverage gate** on `custom_components/telegraf_mqtt`
+(the stated floor is ≥90%; the current measured floor is 100%). Verify the gate on every
+change with:
+
+```powershell
+.\\.venv\\Scripts\\python -m pytest --cov=custom_components.telegraf_mqtt --cov-report=term-missing --no-cov-on-fail
+```
+
+
 
 ### Main implementation areas
 

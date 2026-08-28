@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from time import monotonic
 from typing import Any
 
 from .models import MetricDescriptor
+
+_LOGGER = logging.getLogger(__name__)
 
 _DEVICE_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -200,6 +203,16 @@ class MetricRegistry:
             )
             if on_write is not None:
                 on_write(metric_key or descriptor.unique_key, True, descriptor.value)
+            if prior_available is False:
+                # Phase 8 (Silver, log-when-unavailable): an entity coming
+                # back online is edge-triggered (the value/availability
+                # actually changed, never every message), so this is exactly
+                # one DEBUG line per recovery -- no log spam.
+                _LOGGER.debug(
+                    "Telegraf metric %s (device %s) is available again",
+                    descriptor.unique_key,
+                    self.device_name,
+                )
             return True
 
         # No-op refresh: bring the metric back to life in lifecycle terms.
@@ -232,6 +245,15 @@ class MetricRegistry:
                 state.cleanup_candidate_since = now
                 if on_write is not None:
                     on_write(unique_key, False, state.descriptor.value)
+                # Phase 8 (Silver, log-when-unavailable): the Active->Unavailable
+                # transition is fired exactly once here, so this is one DEBUG
+                # line per transition -- never once per expiry tick.
+                _LOGGER.debug(
+                    "Telegraf metric %s (device %s) went unavailable after no update for %ss",
+                    unique_key,
+                    state.device_name,
+                    self._expire_after,
+                )
 
     def cleanup(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> list[str]:
         """Remove Cleanup-Candidate metrics that have been stale for >= cleanup_delay.
