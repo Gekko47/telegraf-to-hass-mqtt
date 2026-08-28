@@ -134,6 +134,8 @@ def _patch(monkeypatch: pytest.MonkeyPatch) -> FakeMqtt:
     monkeypatch.setattr(integration, "async_dispatcher_send", fake_dispatch)
     monkeypatch.setattr(integration, "async_dispatcher_connect", fake_dispatcher_connect)
     monkeypatch.setattr(integration, "async_track_time_interval", fake_track_time_interval)
+    # Phase 7: stub the issue registry so repairs helpers are a no-op.
+    monkeypatch.setattr(integration, "ir", None)
     return fake_mqtt
 
 
@@ -344,9 +346,11 @@ def test_entity_unique_id_is_domain_prefixed_and_stable(monkeypatch: pytest.Monk
         class _E:
             runtime_data: Any
             entry_id: str = "entry-1"
+        from custom_components.telegraf_mqtt.parser import TelegrafParser as _TP
         e = _E(runtime_data=integration.TelegrafMqttRuntimeData(
             manager=manager,
-            parser=__import__("custom_components.telegraf_mqtt.parser", fromlist=["TelegrafParser"]).TelegrafParser(),
+            parser=_TP(),
+            parser_stats=_TP().stats,
             manufacturer=None,
             model=None,
         ))

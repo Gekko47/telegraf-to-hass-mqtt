@@ -59,6 +59,17 @@ class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
+        # Prefer previously-saved values so the form repopulates the user's
+        # last choices; fall back to module defaults for fresh entries.
+        current_options = self.config_entry.options
+        enable_cleanup = current_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)
+        cleanup_delay = current_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)
+        delete_delay = current_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)
+        min_active_metrics = current_options.get(
+            CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS
+        )
+        non_negative_int = vol.All(int, vol.Range(min=0))
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -67,18 +78,12 @@ class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(CONF_FIELD_OVERRIDES, default={}): dict,
                     vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): int,
                     # Phase 6: per-metric + device-lifecycle tunables.
+                    vol.Optional(CONF_ENABLE_CLEANUP, default=enable_cleanup): bool,
+                    vol.Optional(CONF_CLEANUP_DELAY, default=cleanup_delay): non_negative_int,
+                    vol.Optional(CONF_DELETE_DELAY, default=delete_delay): non_negative_int,
                     vol.Optional(
-                        CONF_ENABLE_CLEANUP, default=DEFAULT_ENABLE_CLEANUP
-                    ): bool,
-                    vol.Optional(
-                        CONF_CLEANUP_DELAY, default=DEFAULT_CLEANUP_DELAY
-                    ): int,
-                    vol.Optional(
-                        CONF_DELETE_DELAY, default=DEFAULT_DELETE_DELAY
-                    ): int,
-                    vol.Optional(
-                        CONF_MIN_ACTIVE_METRICS, default=DEFAULT_MIN_ACTIVE_METRICS
-                    ): int,
+                        CONF_MIN_ACTIVE_METRICS, default=min_active_metrics
+                    ): non_negative_int,
                 }
             ),
         )

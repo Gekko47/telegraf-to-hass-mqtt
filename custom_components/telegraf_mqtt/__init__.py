@@ -15,6 +15,7 @@ try:
     from homeassistant.core import HomeAssistant, callback
     from homeassistant.exceptions import ConfigEntryNotReady
     from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers import issue_registry as ir
     from homeassistant.helpers.dispatcher import (
         async_dispatcher_connect,
         async_dispatcher_send,
@@ -31,6 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test im
     async_track_time_interval = None
     ConfigEntryNotReady = Exception
     er = None
+    ir = None
 
 from .const import (
     CONF_CLEANUP_DELAY,
@@ -52,8 +54,12 @@ from .const import (
     SIGNAL_NEW_METRIC,
     SIGNAL_REMOVE_METRIC,
 )
-from .parser import TelegrafParser
+from .parser import ParserStats, TelegrafParser
 from .registry import DeviceManager
+from .repairs import (
+    check_invalid_persisted_option,
+    check_overlapping_topics,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +72,7 @@ class TelegrafMqttRuntimeData:
 
     manager: DeviceManager
     parser: TelegrafParser
+    parser_stats: Any  # ``custom_components.telegraf_mqtt.parser.ParserStats``
     manufacturer: str | None
     model: str | None
     unsubscribe: Callable[[], None] | None = None
@@ -74,8 +81,14 @@ class TelegrafMqttRuntimeData:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up telegraf_mqtt from a config entry."""
-    options = _options_from_entry(entry)
-    parser = TelegrafParser()
+    # Tolerate invalid persisted options: a corrupted value falls back
+    # to the default AND raises a Repair issue so the user can correct
+    # it from the UI without the entry failing to set up.
+    options, invalid_options = _options_from_entry_with_repair(
+        hass, entry
+    )
+    parser_stats = ParserStats()
+    parser = TelegrafParser(stats=parser_stats)
     manager = DeviceManager(
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
@@ -89,6 +102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.runtime_data = TelegrafMqttRuntimeData(
         manager=manager,
         parser=parser,
+        parser_stats=parser_stats,
         manufacturer=entry.data.get("manufacturer"),
         model=entry.data.get("model"),
     )
@@ -150,6 +164,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if hasattr(entry, "async_on_unload") and hasattr(entry, "add_update_listener"):
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
+    # Phase 7: Repairs for recoverable config problems. The overlap
+    # check is idempotent -- if this entry's pattern is fine and no
+    # other entry overlaps, it deletes any prior overlap_issue and
+    # creates nothing. Same for invalid-persisted-option checks via
+    # _options_from_entry_with_repair above.
+    check_overlapping_topics(hass, entry)
+
     return True
 
 
@@ -202,18 +223,139 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     _schedule_expiry_check(hass, entry)
 
 
-def _options_from_entry(entry: ConfigEntry) -> TelegrafMqttOptions:
-    """Normalize config entry options into registry settings."""
-    raw_options = getattr(entry, "options", {}) or {}
-    return TelegrafMqttOptions(
-        expire_after=max(1, int(raw_options.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER))),
-        exclude_patterns=tuple(str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])),
-        field_overrides=dict(raw_options.get(CONF_FIELD_OVERRIDES, {})),
-        enable_cleanup=bool(raw_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),
-        cleanup_delay=max(0, int(raw_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY))),
-        delete_delay=max(0, int(raw_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY))),
-        min_active_metrics=max(0, int(raw_options.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS))),
+def _coerce_int_option(
+    raw_options: dict,
+    key: str,
+    default: int,
+    *,
+    minimum: int = 0,
+) -> tuple[int, bool]:
+    """Coerce a numeric option, returning ``(value, was_invalid)``.
+
+    ``was_invalid`` is True if the value was present but not coercible
+    to a non-negative int. ``_options_from_entry_with_repair`` uses
+    this to surface a Repair issue for each invalid field while still
+    applying the default so setup does not crash.
+    """
+    if key not in raw_options:
+        return default, False
+    raw = raw_options[key]
+    if isinstance(raw, bool) or (
+        isinstance(raw, float) and not raw.is_integer()
+    ):
+        return default, True
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default, True
+    if value < minimum:
+        return default, True
+    return value, False
+
+
+def _coerce_bool_option(
+    raw_options: dict, key: str, default: bool
+) -> tuple[bool, bool]:
+    if key not in raw_options:
+        return default, False
+    value = raw_options[key]
+    if not isinstance(value, bool):
+        return default, True
+    return value, False
+
+
+def _normalize_options(
+    raw_options: dict[str, Any],
+) -> tuple[TelegrafMqttOptions, list[str]]:
+    """Coerce raw config-entry options into ``TelegrafMqttOptions``.
+
+    Shared by setup (``_options_from_entry_with_repair``) and the live
+    update / expiry-scheduling consumers (``_options_from_entry``) so
+    every path sees identical normalization. Invalid persisted values
+    -- such as a corrupted ``expire_after="abc"`` -- fall back to their
+    documented defaults and are listed in the returned ``invalid_keys``
+    instead of raising ``ValueError``/``TypeError``.
+    """
+    invalid: list[str] = []
+
+    expire_after, bad = _coerce_int_option(
+        raw_options, CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER, minimum=1
     )
+    if bad:
+        invalid.append(CONF_EXPIRE_AFTER)
+
+    cleanup_delay, bad = _coerce_int_option(
+        raw_options, CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY
+    )
+    if bad:
+        invalid.append(CONF_CLEANUP_DELAY)
+
+    delete_delay, bad = _coerce_int_option(
+        raw_options, CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY
+    )
+    if bad:
+        invalid.append(CONF_DELETE_DELAY)
+
+    min_active_metrics, bad = _coerce_int_option(
+        raw_options, CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS
+    )
+    if bad:
+        invalid.append(CONF_MIN_ACTIVE_METRICS)
+
+    enable_cleanup, bad = _coerce_bool_option(
+        raw_options, CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP
+    )
+    if bad:
+        invalid.append(CONF_ENABLE_CLEANUP)
+
+    options = TelegrafMqttOptions(
+        expire_after=expire_after,
+        exclude_patterns=tuple(
+            str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])
+        ),
+        field_overrides=dict(raw_options.get(CONF_FIELD_OVERRIDES, {})),
+        enable_cleanup=enable_cleanup,
+        cleanup_delay=cleanup_delay,
+        delete_delay=delete_delay,
+        min_active_metrics=min_active_metrics,
+    )
+    return options, invalid
+
+
+def _options_from_entry_with_repair(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> tuple[TelegrafMqttOptions, list[str]]:
+    """Normalize config entry options, surfacing invalid ones as a Repair issue.
+
+    Returns a tuple of ``(options, list_of_invalid_keys)``. Setup still
+    succeeds with the defaults for any invalid field; the user sees
+    the issue in Settings -> Repairs and can correct it from the
+    options UI.
+    """
+    raw_options = getattr(entry, "options", {}) or {}
+    options, invalid = _normalize_options(raw_options)
+
+    # Phase 7: raise / clear the Repair issue for invalid options.
+    check_invalid_persisted_option(hass, entry, invalid)
+
+    return options, invalid
+
+
+def _options_from_entry(entry: ConfigEntry) -> TelegrafMqttOptions:
+    """Normalize config entry options into registry settings.
+
+    Uses the exact same safe coercion path as setup
+    (``_normalize_options``), so a corrupted persisted value such as
+    ``expire_after="abc"`` falls back to its default instead of
+    raising. Retained for callers that must not touch the Repair-issue
+    registry on every options change (the live ``_async_options_updated``
+    listener and ``_schedule_expiry_check`` rescheduling): they consume
+    the normalized ``TelegrafMqttOptions`` with no coercion errors
+    escaping, while setup owns the Repairs side effect.
+    """
+    raw_options = getattr(entry, "options", {}) or {}
+    options, _invalid = _normalize_options(raw_options)
+    return options
 
 
 def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:

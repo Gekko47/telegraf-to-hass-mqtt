@@ -127,6 +127,10 @@ def _patch_runtime(monkeypatch) -> tuple[FakeMqtt, list[tuple[str, str]]]:
     monkeypatch.setattr(integration, "async_dispatcher_send", fake_dispatch)
     monkeypatch.setattr(integration, "async_dispatcher_connect", fake_dispatcher_connect)
     monkeypatch.setattr(integration, "async_track_time_interval", fake_track_time_interval)
+    # Phase 7: stub the issue registry so ``check_overlapping_topics`` and
+    # ``check_invalid_persisted_option`` are a no-op in harness-free tests
+    # (they would otherwise try to talk to the real HA registry).
+    monkeypatch.setattr(integration, "ir", None)
     return fake_mqtt, dispatched
 
 
@@ -229,11 +233,45 @@ def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     assert registry._delete_delay == 9
 
 
+def test_live_update_recovers_invalid_persisted_values_without_reload(
+    monkeypatch,
+) -> None:
+    """``_options_from_entry`` shares setup's safe normalization: a
+    corrupted persisted value reaching the live-update listener (and the
+    expiry reschedule it triggers) falls back to its default instead of
+    raising, so no coercion error can escape the recovery path."""
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 5})
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor())
+
+    from custom_components.telegraf_mqtt.const import (
+        DEFAULT_CLEANUP_DELAY,
+        DEFAULT_EXPIRE_AFTER,
+    )
+
+    # Corrupt the options the way a damaged .storage file would: the
+    # update listener then re-normalizes with defaults instead of
+    # crashing on int('abc') / int(None).
+    entry.options = {CONF_EXPIRE_AFTER: 'abc', CONF_CLEANUP_DELAY: None}
+    asyncio.run(entry.update_listener(hass, entry))
+
+    assert entry.runtime_data.manager._expire_after == DEFAULT_EXPIRE_AFTER
+    assert entry.runtime_data.manager._cleanup_delay == DEFAULT_CLEANUP_DELAY
+    assert registry._expire_after == DEFAULT_EXPIRE_AFTER
+    # Expiry rescheduling consumed the normalized value (capped at 30s).
+    assert hass.expiry_interval.total_seconds() == min(DEFAULT_EXPIRE_AFTER, 30)
+
+
 def test_unload_entry_succeeds_without_platform_support(monkeypatch) -> None:
     """Import-isolation guard: unload short-circuits when HA platforms are absent."""
     monkeypatch.setattr(integration, "Platform", None)
     entry = FakeConfigEntry()
-    entry.runtime_data = integration.TelegrafMqttRuntimeData(manager=None, parser=None, manufacturer=None, model=None)
+    entry.runtime_data = integration.TelegrafMqttRuntimeData(
+        manager=None, parser=None, parser_stats=None, manufacturer=None, model=None
+    )
 
     assert asyncio.run(integration.async_unload_entry(FakeHass(), entry)) is True
 

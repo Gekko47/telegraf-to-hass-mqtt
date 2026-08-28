@@ -30,5 +30,15 @@
     "abort": {
       "already_configured": "This topic pattern is already configured."
     }
+  },
+  "issues": {
+    "overlap_topic_patterns": {
+      "title": "Overlapping topic patterns",
+      "description": "This Telegraf MQTT entry\u0027s topic pattern \"{own_topic}\" overlaps with another entry \"{other_entry_title}\" whose pattern is \"{other_topic}\". The same MQTT messages will be processed by both entries, producing duplicate entities. Change one of the patterns so they cover distinct message streams."
+    },
+    "invalid_persisted_option": {
+      "title": "Invalid Telegraf MQTT option(s)",
+      "description": "The persisted value for {options} is invalid. The integration fell back to default values ({defaults}) so setup could complete. Open the integration\u0027s options dialog and correct the values, or remove and re-add the entry to reset the options to defaults."
+    }
   }
 }
