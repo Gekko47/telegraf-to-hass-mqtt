@@ -18,40 +18,40 @@ from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.translations_strings import format_translation
 
 REFERENCE_PAYLOADS: list[dict] = [
-    {"name": "cpu", "tags": {"host": "cachyos-gekko"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
+    {"name": "cpu", "tags": {"host": "host-a"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
     {
         "name": "mem",
-        "tags": {"host": "cachyos-gekko"},
+        "tags": {"host": "host-a"},
         "fields": {"used_percent": 41.2, "used": 8589934592},
         "timestamp": 1721664000,
     },
     {
         "name": "disk",
-        "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+        "tags": {"host": "host-a", "path": "/", "fstype": "ext4"},
         "fields": {"used_percent": 63.5, "free": 128849018880},
         "timestamp": 1721664000,
     },
     {
         "name": "net",
-        "tags": {"host": "cachyos-gekko", "interface": "wlan0"},
+        "tags": {"host": "host-a", "interface": "wlan0"},
         "fields": {"bytes_recv": 1048576000, "bytes_sent": 209715200},
         "timestamp": 1721664000,
     },
     {
         "name": "sensors",
-        "tags": {"host": "cachyos-gekko", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
+        "tags": {"host": "host-a", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
         "fields": {"temp_input": 52.0},
         "timestamp": 1721664000,
     },
     {
         "name": "nvidia_gpu",
-        "tags": {"host": "cachyos-gekko"},
+        "tags": {"host": "host-a"},
         "fields": {"gpu_util": 12, "temp": 45.0, "mem_used": 1024},
         "timestamp": 1721664000,
     },
     {
         "name": "battery",
-        "tags": {"host": "cachyos-gekko", "state": "discharging"},
+        "tags": {"host": "host-a", "state": "discharging"},
         "fields": {"percentage": 87.0, "voltage": 11.4},
         "timestamp": 1721664000,
     },
@@ -99,9 +99,7 @@ def test_reference_payload_names_and_metadata(measurement: str) -> None:
     assert sorted(by_field) == sorted(expected_fields)
     for field, name, unit, device_class, category in EXPECTED_NAMING[measurement]:
         descriptor = by_field[field]
-        rendered = format_translation(
-            descriptor.translation_key, dict(descriptor.translation_placeholders)
-        )
+        rendered = format_translation(descriptor.translation_key, dict(descriptor.translation_placeholders))
         assert rendered == name, field
         assert descriptor.native_unit == unit, field
         assert descriptor.suggested_device_class == device_class, field
@@ -122,8 +120,7 @@ def test_unknown_measurement_falls_back_to_generic_without_raising(caplog) -> No
         descriptors = parser.parse(json.dumps(payload))
 
     assert [
-        (d.field, d.value, format_translation(d.translation_key, dict(d.translation_placeholders)))
-        for d in descriptors
+        (d.field, d.value, format_translation(d.translation_key, dict(d.translation_placeholders))) for d in descriptors
     ] == [("watts", 12.5, "Watts")]
     fallback_records = [r for r in caplog.records if "custom_plugin" in r.getMessage()]
     assert fallback_records

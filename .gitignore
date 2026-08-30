@@ -430,3 +430,13 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Local pytest / coverage log dumps. These are ad-hoc developer-side
+# artifacts that embed absolute filesystem paths (e.g.
+# ``C:\repos\<repo>\.venv\Lib\site-packages\...``). They are regenerated
+# on every test run, so sanitizing them in place would be immediately
+# overwritten; keep them out of version control instead.
+cov.txt
+coverage_out.txt
+coverage_full.txt
+pytest_out.txt

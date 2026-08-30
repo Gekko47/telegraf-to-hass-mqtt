@@ -222,7 +222,7 @@ def test_device_manager_discovers_multiple_devices_and_isolates_metrics() -> Non
                 field="usage_idle",
                 value=88.4,
                 timestamp=1721664000,
-                    native_unit=None,
+                native_unit=None,
                 suggested_device_class=None,
                 suggested_state_class="measurement",
                 entity_category=None,
@@ -234,7 +234,7 @@ def test_device_manager_discovers_multiple_devices_and_isolates_metrics() -> Non
                 field="used_percent",
                 value=41.2,
                 timestamp=1721664000,
-                    native_unit=None,
+                native_unit=None,
                 suggested_device_class=None,
                 suggested_state_class="measurement",
                 entity_category=None,
@@ -323,9 +323,7 @@ def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_sta
 
     # Both devices saw their stale metric marked unavailable; only the
     # active device's candidate is removed by cleanup.
-    assert {k for k, _ in candidate_writes} == {
-        "server01:cpu_usage_idle", "server02:mem_used_percent"
-    }
+    assert {k for k, _ in candidate_writes} == {"server01:cpu_usage_idle", "server02:mem_used_percent"}
     assert removed == ["server01:cpu_usage_idle"]
     assert writes == [("server01:cpu_usage_idle", False)]
     assert manager.get_metric("server01:cpu_usage_idle") is None
@@ -485,24 +483,19 @@ def test_fully_stale_device_marks_entities_unavailable_and_never_deletes_them() 
     clock[0] = 200.0  # far past expire_after for every metric on the device
 
     unavailable: list[tuple[str, bool]] = []
-    manager.check_expiry(
-        on_write=lambda key, available, value: unavailable.append((key, available))
-    )
+    manager.check_expiry(on_write=lambda key, available, value: unavailable.append((key, available)))
 
     assert set(unavailable) == {
         ("server09:mem_used_percent", False),
         ("server09:cpu_usage_idle", False),
     }
     assert all(
-        manager.get_metric(f"server09:{key}").is_available is False
-        for key in ("mem_used_percent", "cpu_usage_idle")
+        manager.get_metric(f"server09:{key}").is_available is False for key in ("mem_used_percent", "cpu_usage_idle")
     )
 
     # Heartbeat long expired -> cleanup skips the whole device.
     writes: list[tuple[str, bool]] = []
-    removed = manager.cleanup(
-        on_write=lambda key, available, value: writes.append((key, available))
-    )
+    removed = manager.cleanup(on_write=lambda key, available, value: writes.append((key, available)))
     assert removed == []
     assert writes == []
     assert manager.keys() == ("server09:mem_used_percent", "server09:cpu_usage_idle")

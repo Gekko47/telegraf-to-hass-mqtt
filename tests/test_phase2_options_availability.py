@@ -48,9 +48,7 @@ def _unique_id(host: str, unique_key: str) -> str:
     return f"{DOMAIN}_{host}_{unique_key}"
 
 
-async def _setup_entry(
-    hass: HomeAssistant, mqtt_mock, options: dict | None = None
-) -> MockConfigEntry:
+async def _setup_entry(hass: HomeAssistant, mqtt_mock, options: dict | None = None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Telegraf",
@@ -74,9 +72,7 @@ async def _feed(hass: HomeAssistant, host: str, measurement: str, fields: dict) 
 
 def _entity_id_for(hass: HomeAssistant, unique_id: str) -> str:
     entity_registry = er.async_get(hass)
-    return next(
-        e.entity_id for e in entity_registry.entities.values() if e.unique_id == unique_id
-    )
+    return next(e.entity_id for e in entity_registry.entities.values() if e.unique_id == unique_id)
 
 
 def _domain_entity_ids(hass: HomeAssistant) -> set[str]:

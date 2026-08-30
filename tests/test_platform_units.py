@@ -28,7 +28,12 @@ _TARGETS_HOLDER: dict[str, list] = {"targets": {}}
 
 
 def _install_platform_stubs(monkeypatch) -> dict[str, list]:
-    """Minimal HA stand-ins; records dispatcher targets by signal for later dispatch."""
+    """Minimal HA stand-ins; records dispatcher targets by signal for later dispatch.
+
+    Kept in lockstep with the platforms' import surface (see conftest's
+    ``_build_ha_stub_modules``): a missing name pulls the real HA package
+    into the stub window and poisons later harness tests.
+    """
     components = types.ModuleType("homeassistant.components")
     sensor = types.ModuleType("homeassistant.components.sensor")
     binary_sensor = types.ModuleType("homeassistant.components.binary_sensor")
@@ -37,6 +42,7 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     core = types.ModuleType("homeassistant.core")
     device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
     helpers = types.ModuleType("homeassistant.helpers")
 
     class StubEntity:
@@ -72,11 +78,26 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")
 
-    class StubEntityCategory(str, enum.Enum):
+    class StubEntityCategory(enum.StrEnum):
         CONFIG = "config"
         DIAGNOSTIC = "diagnostic"
 
+    class SensorDeviceClass(enum.StrEnum):
+        TEMPERATURE = "temperature"
+        POWER = "power"
+        ENERGY = "energy"
+
+    class SensorStateClass(enum.StrEnum):
+        MEASUREMENT = "measurement"
+        TOTAL = "total"
+        TOTAL_INCREASING = "total_increasing"
+
     entity_helpers.EntityCategory = StubEntityCategory
+
+    sensor.SensorDeviceClass = SensorDeviceClass
+    sensor.SensorStateClass = SensorStateClass
+    const.EntityCategory = StubEntityCategory
+    entity_platform.AddEntitiesCallback = object
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
     monkeypatch.setitem(sys.modules, "homeassistant.components.sensor", sensor)
@@ -88,6 +109,7 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity", entity_helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_platform", entity_platform)
     return targets
 
 
@@ -259,6 +281,37 @@ def test_binary_sensor_refresh_guard_without_state(platform_env) -> None:
     assert entity.available is False
     assert entity.is_on is None
     assert entity.extra_state_attributes is None
+
+
+def test_binary_sensor_setup_ignores_unknown_signals(platform_env) -> None:
+    """The binary_sensor platform's ``add_metric`` guard must return without
+    adding an entity when (a) the manager has no record of the metric key
+    (``state is None``) or (b) the metric was already added. Mirrors the
+    sensor-side test in ``test_sensor_setup_adds_existing_metrics_and_ignores_unknown_signals``
+    so both platform branches are exercised in lock-step -- if one drifts the
+    coverage report surfaces the gap immediately."""
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("link_up", True))
+
+    added, targets, _entry = _setup_platform(binary_module, manager)
+
+    assert len(added) == 1  # the one boolean metric that exists
+    assert added[0]._attr_unique_id == "telegraf_mqtt_host1_link_up"
+
+    new_metric_signal = SIGNAL_NEW_METRIC.format(entry_id=ENTRY_ID)
+    assert targets[new_metric_signal], "setup must subscribe to the new-metric signal"
+
+    # Unknown metric key: guard returns without adding (state is None).
+    for target in targets[new_metric_signal]:
+        target("bogus:key")
+    assert len(added) == 1
+
+    # Known-but-already-added key: dedup guard returns as well.
+    for target in targets[new_metric_signal]:
+        target("host1:link_up")
+    assert len(added) == 1
 
 
 def test_diagnostic_descriptors_carry_entity_category_on_sensor(platform_env) -> None:

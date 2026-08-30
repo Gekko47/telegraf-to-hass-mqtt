@@ -6,6 +6,11 @@ mapping; the entity layer reads them, the ``en.json`` translator
 formats them, and the user sees the localised result. This module is
 the *only* place that turns a ``(measurement, field, tags)`` triple into
 a translation key.
+
+Phase 10: per-entity category overrides. The options flow can store
+``{unique_key: "config" | "diagnostic" | None}`` to flip the auto-derived
+category for one specific metric. The override is consulted by
+``apply_category_override`` after the heuristic resolves.
 """
 
 from __future__ import annotations
@@ -45,6 +50,16 @@ ICON_KEY_PERCENTAGE = "percentage"
 ICON_KEY_BINARY = "binary"
 ICON_KEY_GENERIC = "generic"
 
+# Entity-category literals. Mirror the values HA's EntityCategory enum accepts.
+ENTITY_CATEGORY_CONFIG = "config"
+ENTITY_CATEGORY_NONE = ""  # sentinel: an override that explicitly clears the category
+
+VALID_ENTITY_CATEGORIES = (
+    ENTITY_CATEGORY_CONFIG,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    None,  # explicit "no category"
+)
+
 _DIAGNOSTIC_FIELDS: frozenset[str] = frozenset({"uptime", "boot_time"})
 _LOAD_AVERAGE_FIELDS: frozenset[str] = frozenset({"load1", "load5", "load15"})
 _PROCESS_FIELD_PREFIX = "processes_"
@@ -63,9 +78,7 @@ def _network_token(tag_value: str) -> str:
     return TAG_ALIASES.get(tag_value.lower(), tag_value)
 
 
-def resolve_translation(
-    measurement: str, tags: Mapping[str, str], field: str
-) -> tuple[str, dict[str, str]]:
+def resolve_translation(measurement: str, tags: Mapping[str, str], field: str) -> tuple[str, dict[str, str]]:
     """Return ``(translation_key, placeholders)`` for a metric."""
     measurement_lower = measurement.lower()
     display_field = _display_field(field)
@@ -107,7 +120,13 @@ def resolve_translation(
 
 
 def resolve_entity_category(measurement: str, field: str) -> str | None:
-    """Resolve the entity category from measurement + field heuristics."""
+    """Resolve the entity category from measurement + field heuristics.
+
+    The return value is a string category, ``None`` for "no category".
+    The Phase 10 per-entity override map is layered on top of this in
+    ``apply_category_override`` (called by the registry); this function
+    is the heuristic baseline.
+    """
     measurement_lower = measurement.lower()
     if measurement_lower in _DIAGNOSTIC_MEASUREMENTS:
         return ENTITY_CATEGORY_DIAGNOSTIC
@@ -121,6 +140,42 @@ def resolve_entity_category(measurement: str, field: str) -> str | None:
         return ENTITY_CATEGORY_DIAGNOSTIC
 
     return None
+
+
+def apply_category_override(
+    measurement: str,
+    field: str,
+    unique_key: str,
+    overrides: Mapping[str, str | None] | None,
+) -> str | None:
+    """Layer a per-entity category override on top of the heuristic.
+
+    ``overrides`` is a ``{unique_key: category}`` map stored in
+    ``entry.options[CATEGORY_OVERRIDES]``. Values accepted:
+
+    - ``"config"`` -> forced to the config category.
+    - ``"diagnostic"`` -> forced to diagnostic.
+    - ``""`` or ``None`` -> clear the auto-derived category (entity
+      appears in the primary list).
+    - any other value -> the override is ignored and the heuristic
+      result is returned.
+
+    Missing / invalid override keys return the heuristic result
+    unchanged. The function is total over its inputs.
+    """
+    heuristic = resolve_entity_category(measurement, field)
+    if not overrides:
+        return heuristic
+    if unique_key not in overrides:
+        return heuristic
+    raw = overrides[unique_key]
+    if raw in (None, ENTITY_CATEGORY_NONE):
+        return None
+    if raw == ENTITY_CATEGORY_CONFIG:
+        return ENTITY_CATEGORY_CONFIG
+    if raw == ENTITY_CATEGORY_DIAGNOSTIC:
+        return ENTITY_CATEGORY_DIAGNOSTIC
+    return heuristic
 
 
 def infer_icon_key(measurement: str, field: str) -> str:

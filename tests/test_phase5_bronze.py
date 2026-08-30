@@ -23,20 +23,19 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-
-import custom_components.telegraf_mqtt as integration
 from conftest import (
     _install_sensor_stubs_and_reload,
     _pop_integration_modules,
     _restore_ha_stubs,
 )
+
+import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
     CONF_DEVICE_NAME,
     CONF_TOPIC_PATTERN,
     DOMAIN,
 )
 from custom_components.telegraf_mqtt.models import MetricDescriptor
-
 
 # ---------------------------------------------------------------------------
 # FakeHass / FakeConfigEntry / FakeMqtt
@@ -97,9 +96,7 @@ class FakeMqtt:
         self.unsubscribe_calls: int = 0
         self.raise_on_call: dict[int, type[BaseException]] = {}
 
-    async def async_subscribe(
-        self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]
-    ) -> Callable[[], None]:
+    async def async_subscribe(self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]) -> Callable[[], None]:
         call_index = len(self.subscribe_calls) + 1
         self.subscribe_calls.append((topic_pattern, callback))
         if call_index in self.raise_on_call:
@@ -203,20 +200,31 @@ def test_setup_raises_when_probe_subscription_fails(monkeypatch: pytest.MonkeyPa
 def test_setup_does_not_duplicate_subscriptions_on_successful_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After the probe succeeds, the real subscription is installed exactly
-    once. ``entry.runtime_data.unsubscribe`` is wired to a real teardown
-    handle (we verify by calling it; identity comparison is unreliable
-    because the integration may wrap the bound method)."""
+    """After setup, the real subscription is installed exactly once and the
+    snoop listener is installed exactly once. ``entry.runtime_data.unsubscribe``
+    is wired to a real teardown handle (we verify by calling it; identity
+    comparison is unreliable because the integration may wrap the bound
+    method).
+
+    Phase 10 follow-up: the SUBSCRIBE-ACK probe is gone -- the broker
+    precheck is ``mqtt.async_wait_for_mqtt_client`` (canonical on HA
+    2026.6). Two subscribes remain: the real subscription and the
+    snoop. Both teardown handles are wired to ``runtime_data``.
+    """
     fake_mqtt = _patch(monkeypatch)
     hass = FakeHass()
     entry = FakeConfigEntry()
 
     asyncio.run(integration.async_setup_entry(hass, entry))
 
-    # Probe was unsubscribed inline; only the real subscription remains live.
-    assert fake_mqtt.unsubscribe_calls == 1
+    # No probe means no inline unsubscribe at setup time.
+    assert fake_mqtt.unsubscribe_calls == 0
+    # Real subscription and snoop are both wired.
     assert entry.runtime_data.unsubscribe is not None
+    assert entry.runtime_data.unsubscribe_snoop is not None
     entry.runtime_data.unsubscribe()
+    assert fake_mqtt.unsubscribe_calls == 1
+    entry.runtime_data.unsubscribe_snoop()
     assert fake_mqtt.unsubscribe_calls == 2
 
 
@@ -290,13 +298,16 @@ def test_entity_unique_id_is_domain_prefixed_and_stable() -> None:
         class _E:
             runtime_data: Any
             entry_id: str = "entry-1"
-        e = _E(runtime_data=integration.TelegrafMqttRuntimeData(
-            manager=manager,
-            parser=TelegrafParser(),
-            parser_stats=TelegrafParser().stats,
-            manufacturer=None,
-            model=None,
-        ))
+
+        e = _E(
+            runtime_data=integration.TelegrafMqttRuntimeData(
+                manager=manager,
+                parser=TelegrafParser(),
+                parser_stats=TelegrafParser().stats,
+                manufacturer=None,
+                model=None,
+            )
+        )
         entity = sensor_mod.TelegrafMqttSensor(e, "host1:mem_used_percent")
         assert entity._attr_unique_id == "telegraf_mqtt_host1_mem_used_percent"
         # And the domain prefix is the actual DOMAIN constant, not a hardcode.
@@ -313,26 +324,31 @@ def test_entity_unique_id_is_domain_prefixed_and_stable() -> None:
 
 def test_unload_unsubscribes_and_cancels_periodic_task(monkeypatch: pytest.MonkeyPatch) -> None:
     """``async_unload_entry`` must fire every registered cleanup handle
-    (MQTT unsubscribe, expiry-timer cancel, options-update listener).
+    (MQTT unsubscribe for the real sub + the snoop, expiry-timer cancel,
+    options-update listener).
 
     Phase 5 exit criterion: "unload test leaves zero residual listeners/timers."
+    Phase 10 follow-up: the snoop listener's unsubscribe handle is also
+    wiped on unload.
     """
     fake_mqtt = _patch(monkeypatch)
     hass = FakeHass()
     entry = FakeConfigEntry()
 
     assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
-    # Setup already fired one unsubscribe (the probe). Unload must fire another.
+    # Setup installs the real sub + the snoop; no inline unsubscribe.
     unsubs_after_setup = fake_mqtt.unsubscribe_calls
-    assert unsubs_after_setup == 1
+    assert unsubs_after_setup == 0
     assert entry.runtime_data.cancel_expiry is not None
 
     assert asyncio.run(integration.async_unload_entry(hass, entry)) is True
 
-    # Unload tore down the real subscription (one more unsubscribe).
-    assert fake_mqtt.unsubscribe_calls == unsubs_after_setup + 1
-    # The cancel handle is wiped, so a second unload is a clean no-op.
+    # Unload tore down the real sub and the snoop -- two unsubscribes.
+    assert fake_mqtt.unsubscribe_calls == unsubs_after_setup + 2
+    # The cancel handle and both teardown handles are wiped, so a second
+    # unload is a clean no-op.
     assert entry.runtime_data.unsubscribe is None
+    assert entry.runtime_data.unsubscribe_snoop is None
     assert entry.runtime_data.cancel_expiry is None
     # Platform unload was requested.
     assert hass.config_entries.unloaded, "platforms.unload was not requested"
@@ -347,8 +363,8 @@ def test_all_setup_state_lives_on_entry_runtime_data(monkeypatch: pytest.MonkeyP
     """No per-entry state should leak onto ``hass.data[DOMAIN]`` or module-level
     globals. Everything observable lives on ``entry.runtime_data``.
     """
-    from custom_components.telegraf_mqtt.registry import DeviceManager
     from custom_components.telegraf_mqtt.parser import TelegrafParser
+    from custom_components.telegraf_mqtt.registry import DeviceManager
 
     fake_mqtt = _patch(monkeypatch)
     hass = FakeHass()

@@ -21,7 +21,6 @@ import json
 from dataclasses import dataclass
 
 import pytest
-
 from conftest import (
     _install_binary_sensor_stubs_and_reload,
     _install_sensor_stubs_and_reload,
@@ -29,7 +28,6 @@ from conftest import (
     _restore_ha_stubs,
 )
 
-from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parser import TelegrafParser
 from custom_components.telegraf_mqtt.parsers.generic import (
     infer_device_class,
@@ -305,7 +303,12 @@ def test_reference_payload_combinations_are_recorder_valid() -> None:
     """
     reference_payloads = [
         {"name": "cpu", "tags": {"host": "h"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
-        {"name": "mem", "tags": {"host": "h"}, "fields": {"used_percent": 41.2, "used": 8589934592}, "timestamp": 1721664000},
+        {
+            "name": "mem",
+            "tags": {"host": "h"},
+            "fields": {"used_percent": 41.2, "used": 8589934592},
+            "timestamp": 1721664000,
+        },
         {
             "name": "disk",
             "tags": {"host": "h", "path": "/", "fstype": "ext4"},
@@ -324,7 +327,12 @@ def test_reference_payload_combinations_are_recorder_valid() -> None:
             "fields": {"temp_input": 52.0},
             "timestamp": 1721664000,
         },
-        {"name": "nvidia_gpu", "tags": {"host": "h"}, "fields": {"gpu_util": 12, "temp": 45.0, "mem_used": 1024}, "timestamp": 1721664000},
+        {
+            "name": "nvidia_gpu",
+            "tags": {"host": "h"},
+            "fields": {"gpu_util": 12, "temp": 45.0, "mem_used": 1024},
+            "timestamp": 1721664000,
+        },
         {
             "name": "battery",
             "tags": {"host": "h", "state": "discharging"},

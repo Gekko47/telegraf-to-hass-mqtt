@@ -51,9 +51,7 @@ def test_resolve_translation_unknown_measurement_falls_back_to_generic() -> None
 
 def test_resolve_translation_disk_non_root_path() -> None:
     """A ``disk`` payload without ``path == "/"`` uses the generic disk_field key."""
-    key, placeholders = resolve_translation(
-        "disk", {"host": "h", "path": "/data"}, "used_percent"
-    )
+    key, placeholders = resolve_translation("disk", {"host": "h", "path": "/data"}, "used_percent")
     assert key == "disk_field"
     assert placeholders == {"field": "Used Percent"}
 

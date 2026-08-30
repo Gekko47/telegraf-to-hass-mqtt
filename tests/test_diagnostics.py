@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from typing import ClassVar
 
 from custom_components.telegraf_mqtt.const import (
     CONF_EXPIRE_AFTER,
@@ -74,16 +75,16 @@ class FakeParserStats:
     # something to look for. The integration code never includes any
     # of these in the real ``last_message``; if it ever does, the
     # assertion below will fail.
-    last_message = {
+    last_message: ClassVar[dict] = {
         "topic": "telegraf/host1/cpu",
         "byte_length": 142,
         "dropped_reason": None,
         "measurement": "cpu",
         # Fake raw payload, field value, and host identity -- none of
         # which should ever appear in the serialised diagnostics.
-        "raw_payload": '{"name":"cpu","fields":{"usage_user":42.0},"tags":{"host":"cachyos-gekko"}}',
+        "raw_payload": '{"name":"cpu","fields":{"usage_user":42.0},"tags":{"host":"host-a"}}',
         "value": 42.0,
-        "host": "cachyos-gekko",
+        "host": "host-a",
     }
 
 
@@ -187,7 +188,7 @@ def test_diagnostics_never_leaks_raw_payload() -> None:
         # in a real downloaded diagnostics file. A regression that
         # adds a ``raw_payload`` / ``payload`` / ``value_bytes`` key
         # to ``last_message`` will surface here.
-        '{"name":"cpu","fields":{"usage_user":42.0},"tags":{"host":"cachyos-gekko"}}',
+        '{"name":"cpu","fields":{"usage_user":42.0},"tags":{"host":"host-a"}}',
         "raw_payload",
         "value_bytes",
         # The fake field value (``42.0`` from the seeded payload) --
@@ -195,11 +196,11 @@ def test_diagnostics_never_leaks_raw_payload() -> None:
         # context and must never appear in a downloaded file.
         "usage_user",
         # The fake host identity -- the user's machine name. The
-        # underlying Telegraf host (e.g. "cachyos-gekko") must never
+        # underlying Telegraf host (e.g. "host-a") must never
         # appear in a downloaded diagnostics file. ``device_id`` is
         # hashed and ``device_name`` is omitted from the per-device
         # block to enforce that.
-        "cachyos-gekko",
+        "host-a",
     )
     for forbidden in forbidden_substrings:
         assert forbidden not in text, f"diagnostics leaked {forbidden!r}"
@@ -221,14 +222,10 @@ def test_diagnostics_never_leaks_raw_payload() -> None:
     # within a single download.
     devices = data["runtime"]["manager"]["devices"]
     for entry in devices:
-        assert "device_name" not in entry, (
-            "device_name must be omitted from the redacted diagnostics"
-        )
-        assert "host1" not in entry["device_id"], (
-            "raw device_id slug must not appear in the redacted diagnostics"
-        )
+        assert "device_name" not in entry, "device_name must be omitted from the redacted diagnostics"
+        assert "host1" not in entry["device_id"], "raw device_id slug must not appear in the redacted diagnostics"
         # ``Host One`` echoes the user-chosen display name; the
-        # underlying Telegraf host name ("cachyos-gekko") is what
+        # underlying Telegraf host name ("host-a") is what
         # the redaction contract protects, and the user-chosen
         # display name can echo the host in practice.
         assert "Host One" not in json.dumps(entry)

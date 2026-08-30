@@ -19,14 +19,13 @@ preserved on a recreate.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-import inspect
 import json
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parsers.generic import parse_generic_payload
@@ -36,7 +35,6 @@ from custom_components.telegraf_mqtt.registry import (
     MetricRegistry,
     MetricState,
 )
-
 
 # ---------------------------------------------------------------------------
 # Tiny helpers
@@ -98,9 +96,7 @@ def test_static_metadata_descriptor_gets_never_cleanup_policy() -> None:
         ("cpu", "cache_size"),
     ],
 )
-def test_static_field_policy_is_case_insensitive(
-    measurement: str, field: str
-) -> None:
+def test_static_field_policy_is_case_insensitive(measurement: str, field: str) -> None:
     assert is_static_field(measurement.upper(), field.upper())
 
 
@@ -178,9 +174,7 @@ def test_healthy_device_removes_only_stale_metric_after_cleanup_delay() -> None:
     just the candidate metric; siblings stay put.
     """
     clock = [100.0]
-    manager = DeviceManager(
-        expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0]
-    )
+    manager = DeviceManager(expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0])
     registry = manager.get_or_create_registry("server01", "server01")
     # Two live metrics: a CPU gauge and a battery gauge.
     registry.update(_descriptor("cpu_usage_idle"))
@@ -229,9 +223,7 @@ def test_offline_device_keeps_every_entity_after_50_days() -> None:
     days past the heartbeat, nothing is removed.
     """
     clock = [100.0]
-    manager = DeviceManager(
-        expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0]
-    )
+    manager = DeviceManager(expire_after=5, cleanup_delay=1, delete_delay=2, clock=lambda: clock[0])
     registry = manager.get_or_create_registry("server02", "server02")
     registry.update(_descriptor("mem_used_percent"))
     registry.last_any_metric = 50.0  # heartbeat is 50s old at clock=100
@@ -304,9 +296,7 @@ def test_prune_empty_devices_removes_only_empty_and_expired() -> None:
     metrics left and (b) its last heartbeat is older than delete_delay.
     """
     clock = [0.0]
-    manager = DeviceManager(
-        expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0]
-    )
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
     empty = manager.get_or_create_registry("gone", "gone")
     full = manager.get_or_create_registry("alive", "alive")
     full.update(_descriptor("cpu_usage_idle"))
@@ -344,9 +334,7 @@ def test_prune_empty_devices_keeps_empty_but_fresh_devices() -> None:
     keep the device alive.
     """
     clock = [0.0]
-    manager = DeviceManager(
-        expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0]
-    )
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
     registry = manager.get_or_create_registry("fresh", "fresh")
     registry.update(_descriptor("battery_percentage"))
     clock[0] = 100.0
@@ -546,6 +534,7 @@ def test_registry_never_imports_entity_platform_modules() -> None:
     ):
         assert forbidden not in src, f"guardrail violation: {forbidden!r} in registry.py"
 
+
 # ---------------------------------------------------------------------------
 # min_active_metrics=0: the guard is disabled, every candidate is removed.
 # Pinned as a branch-coverage target for the ``if available_count <
@@ -581,6 +570,7 @@ def test_min_active_metrics_zero_disables_the_guard() -> None:
     # device would have 0 active metrics after.
     assert manager.cleanup() == ["server01:battery_percentage"]
 
+
 # ---------------------------------------------------------------------------
 # Real-harness test: ``_handle_remove_metric`` actually drops the
 # corresponding entity from the entity registry while preserving the
@@ -595,9 +585,7 @@ def test_min_active_metrics_zero_disables_the_guard() -> None:
 pytestmark = [pytest.mark.parametrize("expected_lingering_timers", [True])]
 
 
-async def test_signal_remove_metric_drops_only_the_target_entity(
-    hass: "HomeAssistant", mqtt_mock
-) -> None:  # type: ignore[name-defined]
+async def test_signal_remove_metric_drops_only_the_target_entity(hass: HomeAssistant, mqtt_mock) -> None:
     """When cleanup fires, the entity for the removed metric is dropped
     from the entity registry; siblings on the same device keep their
     entity_ids, and the parent device itself is preserved.
@@ -652,11 +640,7 @@ async def test_signal_remove_metric_drops_only_the_target_entity(
 
     # Verify both entities are registered and grouped under one device.
     entity_registry = er_helpers.async_get(hass)
-    domain_entries = [
-        e
-        for e in entity_registry.entities.values()
-        if e.platform == DOMAIN
-    ]
+    domain_entries = [e for e in entity_registry.entities.values() if e.platform == DOMAIN]
     by_unique = {e.unique_id: e for e in domain_entries}
     assert len(by_unique) == 2
     cpu_uid = f"{DOMAIN}_server01_cpu_usage_idle"
@@ -670,9 +654,7 @@ async def test_signal_remove_metric_drops_only_the_target_entity(
     # Drive cleanup: age both metrics, mark the battery unavailable,
     # let it pass the cleanup_delay, then advance the device's
     # ``last_any_metric`` so the device is still ACTIVE for cleanup.
-    registry = entry.runtime_data.manager.get_or_create_registry(
-        "server01", "server01"
-    )
+    registry = entry.runtime_data.manager.get_or_create_registry("server01", "server01")
     # Find the state keys. unique_key is the post-slug composite of
     # measurement + sorted non-host tags + field, so for our
     # bare-tag payloads the keys are exactly "cpu_usage_idle" and
@@ -722,15 +704,12 @@ async def test_signal_remove_metric_drops_only_the_target_entity(
     assert remove_metric_entity(hass, "server01:battery_percentage") is True
     await hass.async_block_till_done()
     # Re-collect after cleanup: the battery entity should be gone.
-    by_unique_after = {
-        e.unique_id: e
-        for e in entity_registry.entities.values()
-        if e.platform == DOMAIN
-    }
+    by_unique_after = {e.unique_id: e for e in entity_registry.entities.values() if e.platform == DOMAIN}
     assert battery_uid not in by_unique_after
     assert cpu_uid in by_unique_after
     # Sibling entity_id is preserved across the cleanup.
     assert by_unique_after[cpu_uid].entity_id == cpu_entity_id
+
 
 # ---------------------------------------------------------------------------
 # Branch coverage: ``remove_metric_entity`` no-op paths, prune_empty_devices
@@ -766,7 +745,7 @@ def test_remove_metric_entity_returns_false_when_no_match(
     fake = types.ModuleType("fake_er_no_match")
 
     class _Empty:
-        entities: dict = {}
+        entities: ClassVar[dict] = {}
 
     def _async_get(_hass: object) -> _Empty:
         # ``entity_registry.async_get(hass)`` is sync in real HA despite
@@ -786,9 +765,7 @@ def test_prune_empty_devices_emits_info_log(caplog) -> None:
     import logging
 
     clock = [0.0]
-    manager = DeviceManager(
-        expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0]
-    )
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
     registry = manager.get_or_create_registry("drained", "drained")
     registry.update(_descriptor("only_metric"))
     clock[0] = 100.0
@@ -800,6 +777,7 @@ def test_prune_empty_devices_emits_info_log(caplog) -> None:
         pruned = manager.prune_empty_devices()
     assert pruned == ["drained"]
     assert any("drained" in rec.getMessage() for rec in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Branch coverage for the dispatcher-listener registration helper.
@@ -852,7 +830,7 @@ def test_listener_remove_metric_registers_via_real_dispatcher(monkeypatch: pytes
     # no-match / real-harness tests for its branches; here we just
     # need the listener body line to execute.
     class _Empty:
-        entities: dict = {}
+        entities: ClassVar[dict] = {}
 
     def _async_get(_hass):
         return _Empty()
@@ -862,7 +840,6 @@ def test_listener_remove_metric_registers_via_real_dispatcher(monkeypatch: pytes
     monkeypatch.setattr(integration, "er", fake_er)
     # The captured target is async; running it via asyncio.run is the
     # simplest way to drive the body without the rest of the harness.
-    import asyncio
     asyncio.run(captured["target"]("server01:net_eth0_link_up"))
 
 

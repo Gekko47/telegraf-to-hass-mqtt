@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+from .const import (
+    DOMAIN,
+    PLATFORM_HINT_SENSOR,
+    SIGNAL_METRIC_UPDATED,
+    SIGNAL_NEW_METRIC,
+)
+from .heuristics import ENTITY_CATEGORY_DIAGNOSTIC
 from .icons import ICON_FOR_KEY
-from .naming import ENTITY_CATEGORY_DIAGNOSTIC, infer_icon_key
+from .models import is_bool_metric
+from .naming import infer_icon_key
+from .registry import DeviceManager
 
 
 def _entity_category(value: str | None) -> EntityCategory | None:
@@ -22,7 +31,7 @@ def _entity_category(value: str | None) -> EntityCategory | None:
     return EntityCategory(value) if value else None
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up sensor entities from a config entry."""
     manager = entry.runtime_data.manager
     added: set[str] = set()
@@ -30,7 +39,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     @callback
     def add_metric(metric_key: str) -> None:
         state = manager.get_metric(metric_key)
-        if state is None or isinstance(state.value, bool) or metric_key in added:
+        if state is None or metric_key in added:
+            return
+        # Phase 10 platform routing: bool values belong to the
+        # binary_sensor platform unless a field override forced this
+        # field onto the sensor platform (``platform_hint="sensor"``).
+        # Non-bool values are always sensor material.
+        if is_bool_metric(state.value) and state.descriptor.platform_hint != PLATFORM_HINT_SENSOR:
             return
         added.add(metric_key)
         async_add_entities([TelegrafMqttSensor(entry, metric_key)])
@@ -61,7 +76,10 @@ class TelegrafMqttSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_translation_key: str | None = None
-    _attr_translation_placeholders: dict[str, str] | None = None
+    # HA's base ``Entity`` types this as ``Mapping[str, str]`` although
+    # ``None`` is the de-facto unset value; the ignore pins the runtime
+    # contract the entity code relies on.
+    _attr_translation_placeholders: Mapping[str, str] | None = None  # type: ignore[assignment]
     _attr_entity_registry_enabled_default: bool = True
 
     def __init__(self, entry: ConfigEntry, metric_key: str) -> None:
@@ -78,12 +96,13 @@ class TelegrafMqttSensor(SensorEntity):
         self._attr_translation_key = descriptor.translation_key
         self._attr_translation_placeholders = dict(descriptor.translation_placeholders)
         self._attr_native_unit_of_measurement = _normalize_native_unit(descriptor.native_unit)
-        self._attr_device_class = descriptor.suggested_device_class
-        self._attr_state_class = descriptor.suggested_state_class
+        # The descriptors carry plain strings; HA's attrs are enum types
+        # with identical values. A stray value must not crash entity
+        # creation, so this is a cast rather than an enum construction.
+        self._attr_device_class = cast("SensorDeviceClass | None", descriptor.suggested_device_class)
+        self._attr_state_class = cast("SensorStateClass | None", descriptor.suggested_state_class)
         self._attr_entity_category = _entity_category(descriptor.entity_category)
-        self._attr_entity_registry_enabled_default = (
-            descriptor.entity_category != ENTITY_CATEGORY_DIAGNOSTIC
-        )
+        self._attr_entity_registry_enabled_default = descriptor.entity_category != ENTITY_CATEGORY_DIAGNOSTIC
         self._attr_icon = ICON_FOR_KEY.get(
             infer_icon_key(descriptor.measurement, descriptor.field),
             ICON_FOR_KEY["generic"],
@@ -97,8 +116,11 @@ class TelegrafMqttSensor(SensorEntity):
         )
 
     @property
-    def _manager(self):
-        return self._entry.runtime_data.manager
+    def _manager(self) -> DeviceManager:
+        # ``ConfigEntry.runtime_data`` is untyped from HA's side; the
+        # integration guarantees a ``TelegrafMqttRuntimeData`` here.
+        manager: DeviceManager = self._entry.runtime_data.manager
+        return manager
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to registry updates for this metric."""

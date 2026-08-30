@@ -24,6 +24,7 @@ reasonable amounts" diagnostics.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -45,7 +46,7 @@ def _hash_device_id(device_id: str) -> str:
 
     The registry derives ``device_id`` from the payload's ``host`` tag
     (slugified). The slug usually preserves readable text (e.g.
-    ``cachyos-gekko`` -> ``cachyos_gekko``), which would expose the
+    ``example-host`` -> ``example_host``), which would expose the
     user's machine name in a downloaded diagnostics file. We replace
     the raw slug with a short, stable SHA-256 digest: stable enough
     to correlate devices within a single download, opaque enough
@@ -112,9 +113,7 @@ def _runtime_snapshot(runtime_data: Any) -> dict[str, Any]:
                 # for the same reason as ``device_id`` above.
                 "metric_count": len(registry),
                 "measurements": sorted(measurements),
-                "last_any_metric_age_seconds": max(
-                    0.0, now - registry.last_any_metric
-                ),
+                "last_any_metric_age_seconds": max(0.0, now - registry.last_any_metric),
             }
         )
 
@@ -168,7 +167,7 @@ def _runtime_snapshot(runtime_data: Any) -> dict[str, Any]:
     }
 
 
-def _options_validity(raw_options: dict[str, Any]) -> dict[str, bool]:
+def _options_validity(raw_options: Mapping[str, Any]) -> dict[str, bool]:
     """Per-option validity booleans for the user-facing options.
 
     Each boolean is True if the value can be coerced to the expected
@@ -184,7 +183,7 @@ def _options_validity(raw_options: dict[str, Any]) -> dict[str, bool]:
             return True
         try:
             value = int(raw_options[name])
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
         return value >= minimum
 
@@ -202,9 +201,7 @@ def _options_validity(raw_options: dict[str, Any]) -> dict[str, bool]:
     # Topics are always strings; non-empty and no embedded NULs.
     if CONF_TOPIC_PATTERN in raw_options:
         topic = raw_options[CONF_TOPIC_PATTERN]
-        validity[CONF_TOPIC_PATTERN] = (
-            isinstance(topic, str) and bool(topic) and "\x00" not in topic
-        )
+        validity[CONF_TOPIC_PATTERN] = isinstance(topic, str) and bool(topic) and "\x00" not in topic
 
     # Field overrides: a dict of {field: {unit?, device_class?, ...}}.
     if CONF_FIELD_OVERRIDES in raw_options:

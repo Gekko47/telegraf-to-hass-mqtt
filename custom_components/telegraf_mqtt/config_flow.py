@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
 
 from .const import (
+    CONF_AUTO_DISCOVER,
+    CONF_CATEGORY_OVERRIDES,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
+    CONF_DEVICE_ID_STRATEGY,
     CONF_DEVICE_NAME,
     CONF_ENABLE_CLEANUP,
     CONF_EXCLUDE_PATTERNS,
@@ -22,14 +26,18 @@ from .const import (
     CONF_MODEL,
     CONF_SW_VERSION,
     CONF_TOPIC_PATTERN,
+    DEFAULT_AUTO_DISCOVER,
     DEFAULT_CLEANUP_DELAY,
     DEFAULT_DELETE_DELAY,
+    DEFAULT_DEVICE_ID_STRATEGY,
     DEFAULT_DEVICE_NAME,
     DEFAULT_ENABLE_CLEANUP,
     DEFAULT_EXPIRE_AFTER,
     DEFAULT_MIN_ACTIVE_METRICS,
     DEFAULT_TOPIC_PATTERN,
     DOMAIN,
+    VALID_DEVICE_ID_STRATEGIES,
+    VALID_PLATFORM_HINTS,
 )
 
 
@@ -75,38 +83,102 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
+def _strategy_label(strategy: str) -> str:
+    """Human-readable label for a ``device_id_strategy`` value."""
+    return {
+        "host": "Host tag (default)",
+        "host_topic": "Host tag, then topic segment",
+        "topic_only": "Topic tree only",
+    }.get(strategy, strategy)
+
+
+def _build_options_schema(current_options: Mapping[str, Any]) -> vol.Schema:
+    """Build the Phase 10 multi-section options schema.
+
+    Sections:
+    - Discovery: enable the post-setup snoop listener and pick a
+      ``device_id_strategy`` for resolving ``host`` collisions.
+    - Cleanup lifecycle.
+    - Filter / override: ``exclude_patterns``, ``field_overrides``,
+      and the per-entity ``category_overrides`` map.
+    """
+    enable_cleanup = current_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)
+    cleanup_delay = current_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)
+    delete_delay = current_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)
+    min_active_metrics = current_options.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)
+    auto_discover = current_options.get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)
+    device_id_strategy = current_options.get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)
+    category_overrides = current_options.get(CONF_CATEGORY_OVERRIDES, {})
+    non_negative_int = vol.All(int, vol.Range(min=0))
+
+    return vol.Schema(
+        {
+            vol.Optional(CONF_AUTO_DISCOVER, default=auto_discover): bool,
+            vol.Optional(CONF_DEVICE_ID_STRATEGY, default=device_id_strategy): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=v, label=_strategy_label(v)) for v in VALID_DEVICE_ID_STRATEGIES
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): vol.All(int, vol.Range(min=1)),
+            vol.Optional(CONF_ENABLE_CLEANUP, default=enable_cleanup): bool,
+            vol.Optional(CONF_CLEANUP_DELAY, default=cleanup_delay): non_negative_int,
+            vol.Optional(CONF_DELETE_DELAY, default=delete_delay): non_negative_int,
+            vol.Optional(CONF_MIN_ACTIVE_METRICS, default=min_active_metrics): non_negative_int,
+            vol.Optional(CONF_EXCLUDE_PATTERNS, default=[]): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[],
+                    custom_value=True,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Optional(CONF_FIELD_OVERRIDES, default={}): selector.ObjectSelector(),
+            vol.Optional(CONF_CATEGORY_OVERRIDES, default=category_overrides): selector.ObjectSelector(),
+        }
+    )
+
+
+def _clean_options(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize user input from the options flow before persisting.
+
+    Phase 10: ``CONF_CATEGORY_OVERRIDES`` is an ObjectSelector result;
+    the user can leave it as ``{}``, so we coerce the empty form value
+    back to an empty dict.
+    """
+    return {
+        CONF_AUTO_DISCOVER: bool(user_input.get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)),
+        CONF_DEVICE_ID_STRATEGY: str(user_input.get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)),
+        CONF_EXPIRE_AFTER: int(user_input.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER)),
+        CONF_ENABLE_CLEANUP: bool(user_input.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),
+        CONF_CLEANUP_DELAY: int(user_input.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)),
+        CONF_DELETE_DELAY: int(user_input.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)),
+        CONF_MIN_ACTIVE_METRICS: int(user_input.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)),
+        CONF_EXCLUDE_PATTERNS: list(user_input.get(CONF_EXCLUDE_PATTERNS, [])),
+        CONF_FIELD_OVERRIDES: dict(user_input.get(CONF_FIELD_OVERRIDES, {})),
+        CONF_CATEGORY_OVERRIDES: dict(user_input.get(CONF_CATEGORY_OVERRIDES, {})),
+    }
+
+
 class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
-    """Handle telegraf_mqtt options changes."""
+    """Handle telegraf_mqtt options changes.
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show a minimal options form for the registry controls."""
+    Phase 10: the single ``init`` step grew to cover discovery settings
+    and per-entity category overrides. Each option is documented in
+    ``strings.json``; the schema is built by ``_build_options_schema``
+    so the field set is in one place.
+    """
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Show the multi-section options form."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
-        current_options = self.config_entry.options
-        enable_cleanup = current_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)
-        cleanup_delay = current_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)
-        delete_delay = current_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)
-        min_active_metrics = current_options.get(
-            CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS
-        )
-        non_negative_int = vol.All(int, vol.Range(min=0))
+            return self.async_create_entry(title="", data=_clean_options(user_input))
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_EXCLUDE_PATTERNS, default=[]): list,
-                    vol.Optional(CONF_FIELD_OVERRIDES, default={}): dict,
-                    vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): int,
-                    vol.Optional(CONF_ENABLE_CLEANUP, default=enable_cleanup): bool,
-                    vol.Optional(CONF_CLEANUP_DELAY, default=cleanup_delay): non_negative_int,
-                    vol.Optional(CONF_DELETE_DELAY, default=delete_delay): non_negative_int,
-                    vol.Optional(
-                        CONF_MIN_ACTIVE_METRICS, default=min_active_metrics
-                    ): non_negative_int,
-                }
-            ),
+            data_schema=_build_options_schema(self.config_entry.options),
         )
 
 
@@ -128,7 +200,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Return the options flow handler for an existing entry."""
         return TelegrafMqttOptionsFlow()
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step."""
         if user_input is not None:
             errors = self._validate(user_input)
@@ -176,9 +248,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Phase 9: handle the reconfigure step.
 
         A reconfigure that changes the topic pattern triggers a reload of
@@ -252,7 +322,14 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _get_entry(self) -> ConfigEntry:
         """Return the entry being reconfigured."""
-        entry: ConfigEntry = self.hass.config_entries.async_get_known_entry(
-            self.context["entry_id"]
-        )
+        entry: ConfigEntry = self.hass.config_entries.async_get_known_entry(self.context["entry_id"])
         return entry
+
+
+# Re-export so the ``__init__`` setup can validate the runtime strategy
+# at startup without importing ``.const`` separately.
+__all__ = [
+    "VALID_PLATFORM_HINTS",
+    "TelegrafMqttConfigFlow",
+    "TelegrafMqttOptionsFlow",
+]

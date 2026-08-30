@@ -81,3 +81,186 @@ def test_infer_state_class_shape_rules() -> None:
     assert infer_state_class("usage_idle", 88.4) == "measurement"
     assert infer_state_class("link_up", True) is None
     assert infer_state_class("label", "wifi") is None
+
+
+# ---------------------------------------------------------------------------
+# Adversarial input suite (Phase 10 follow-on).
+#
+# The fault-isolation contract: every per-measurement handler must
+# return [] for malformed-but-JSON-valid payloads instead of raising.
+# Telegraf can't *generate* these inputs in practice, but a misbehaving
+# producer or a corrupted buffer can, and a single ``KeyError`` from
+# ``payload["fields"]["x"]`` should not take down the MQTT subscription.
+# The shapes below are the ones the user explicitly called out:
+# numbers as tags, deeply nested fields, huge arrays, NaN / +/-inf
+# values, NUL bytes in field names, and unicode whitespace.
+# ---------------------------------------------------------------------------
+
+
+_MEASUREMENT_HANDLERS = (
+    "battery",
+    "cpu",
+    "disk",
+    "mem",
+    "net",
+    "nvidia_gpu",
+    "sensors",
+    "generic",  # the fallback path
+)
+
+
+def _parse_for(measurement: str, payload: dict):  # type: ignore[no-untyped-def]
+    """Dispatch a payload to the per-measurement handler.
+
+    The parser layer's ``parse()`` method also drops envelopes that
+    don't match the top-level shape, but that test belongs to
+    test_parser.py. Here we want to hit the *handler* surface
+    directly, so we route via the ``TelegrafParser._PARSERS`` table
+    (or the generic fallback) just like ``parse()`` does internally.
+    """
+    from custom_components.telegraf_mqtt.parser import TelegrafParser
+
+    handler = TelegrafParser._PARSERS.get(measurement)
+    if handler is None:
+        from custom_components.telegraf_mqtt.parsers.generic import parse_generic_payload
+
+        handler = parse_generic_payload
+    return list(handler(payload))
+
+
+def test_every_handler_swallows_numbers_as_tags() -> None:
+    """Tags are coerced to ``str`` in ``parse_generic_payload``; a
+    numeric or list value must not raise inside the handler.
+    """
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1", "port": 80, "rate": 1.5, "weird": [1, 2, 3]},
+        "fields": {"x": 1.0},
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        # Result is either 0 (host tag isn't routed) or 1 descriptor;
+        # the contract is "doesn't raise", not "returns N descriptors".
+        assert isinstance(result, list)
+
+
+def test_every_handler_swallows_deeply_nested_field_values() -> None:
+    """A field value that is a nested dict or list is dropped at the
+    generic path with a DEBUG log. The handler must not raise trying
+    to coerce it.
+    """
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": {
+            "x": {"a": {"b": {"c": 1}}},
+            "y": [[[[1, 2, 3]]]],
+            "z": {"nested": ["list", "of", "things"]},
+        },
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+        for descriptor in result:
+            assert isinstance(descriptor.value, (int, float, str, bool)) or descriptor.value is None
+
+
+def test_every_handler_swallows_huge_field_arrays() -> None:
+    """A field value that is a 10k-element list exercises the size
+    budget without exhausting the test runner.
+    """
+    huge = list(range(10_000))
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": {"big": huge, "small": 1.0},
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+        assert any(descriptor.field == "small" for descriptor in result) or not result
+
+
+def test_every_handler_swallows_nan_and_infinity_values() -> None:
+    """NaN and +/-inf are valid JSON values; the handler must not raise
+    trying to build a descriptor.
+    """
+    import math
+
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": {
+            "nan_value": math.nan,
+            "pos_inf": math.inf,
+            "neg_inf": -math.inf,
+            "normal": 1.0,
+        },
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+
+
+def test_every_handler_swallows_non_string_field_names() -> None:
+    """Integer / None / boolean / list field names are dropped at the
+    generic path. A handler must not assume ``field`` is a string.
+    """
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": {
+            1: "int key",
+            None: "none key",
+            "str_only": 1.0,
+        },
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+        for descriptor in result:
+            assert isinstance(descriptor.field, str)
+            assert descriptor.field == "str_only"
+
+
+def test_every_handler_swallows_unicode_weirdness() -> None:
+    """NUL bytes, RTL marks, zero-width spaces, and full-width digits
+    in field names. The handler must not raise trying to slugify.
+    """
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": {
+            "\x00bad": 1.0,
+            "\u200bzerowidth": 1.0,
+            "\u202e_rtl": 1.0,
+            "\uff11fullwidth_one": 1.0,
+            "ok": 1.0,
+        },
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+
+
+def test_every_handler_swallows_extreme_field_counts() -> None:
+    """A payload with 1000 valid fields still returns a list -- no
+    recursion limit, no accidental quadratic growth.
+    """
+    fields = {f"f{i}": float(i) for i in range(1000)}
+    payload = {
+        "name": "cpu",
+        "tags": {"host": "h1"},
+        "fields": fields,
+        "timestamp": 1,
+    }
+    for measurement in _MEASUREMENT_HANDLERS:
+        result = _parse_for(measurement, payload)
+        assert isinstance(result, list)
+        assert len(result) == 1000

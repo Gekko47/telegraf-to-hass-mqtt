@@ -204,9 +204,7 @@ def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     """
     _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
     hass = FakeHass()
-    entry = FakeConfigEntry(
-        options={CONF_CLEANUP_DELAY: 30, CONF_DELETE_DELAY: 60}
-    )
+    entry = FakeConfigEntry(options={CONF_CLEANUP_DELAY: 30, CONF_DELETE_DELAY: 60})
 
     asyncio.run(integration.async_setup_entry(hass, entry))
     registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
@@ -254,7 +252,7 @@ def test_live_update_recovers_invalid_persisted_values_without_reload(
     # Corrupt the options the way a damaged .storage file would: the
     # update listener then re-normalizes with defaults instead of
     # crashing on int('abc') / int(None).
-    entry.options = {CONF_EXPIRE_AFTER: 'abc', CONF_CLEANUP_DELAY: None}
+    entry.options = {CONF_EXPIRE_AFTER: "abc", CONF_CLEANUP_DELAY: None}
     asyncio.run(entry.update_listener(hass, entry))
 
     assert entry.runtime_data.manager._expire_after == DEFAULT_EXPIRE_AFTER

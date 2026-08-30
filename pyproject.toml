@@ -28,3 +28,49 @@ source = ["custom_components/telegraf_mqtt"]
 [tool.coverage.report]
 fail_under = 100
 show_missing = true
+
+# pytest configuration.  We don't put `-n auto` into ``addopts`` so the CI
+# gate remains a single deterministic run (cleaner coverage reporting, no
+# pytest-xdist scheduling surprises in the gate output).  Local dev should
+# opt in explicitly:
+#
+#   # TDD loop: sharded, no coverage
+#   pytest -n auto
+#
+#   # Local pre-commit: sharded, with coverage
+#   pytest -n auto --cov=custom_components.telegraf_mqtt
+#
+#   # CI / full gate: sequential, with coverage
+#   pytest --cov=custom_components.telegraf_mqtt
+#
+# Wall-time cost on a 12-core machine with 390 tests:
+#   sequential + coverage: ~3:46
+#   xdist + coverage:      ~1:50
+#   xdist, no coverage:    ~1:00
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:homeassistant.*",
+    "ignore::DeprecationWarning:voluptuous.*",
+    "ignore::DeprecationWarning:backoff.*",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "asyncio: mark test as async (auto-applied by pytest-asyncio).",
+]
+
+[tool.mypy]
+# Phase 10: strict typing gate over the integration package. The test
+# suite is out of scope -- it intentionally drives untyped HA fakes and
+# test doubles. Home Assistant is installed with sources; following
+# imports into it would type-check HA itself, so its modules are
+# imported for their types but its own findings are silenced.
+python_version = "3.14"
+files = ["custom_components/telegraf_mqtt"]
+strict = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "homeassistant.*"
+follow_imports = "silent"

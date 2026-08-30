@@ -18,6 +18,7 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     core = types.ModuleType("homeassistant.core")
     device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
     helpers = types.ModuleType("homeassistant.helpers")
 
     class SensorEntity:
@@ -39,6 +40,20 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     class UnitOfTemperature:
         CELSIUS = "°C"
 
+    class StubEntityCategory(enum.StrEnum):
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    class SensorDeviceClass(enum.StrEnum):
+        TEMPERATURE = "temperature"
+        POWER = "power"
+        ENERGY = "energy"
+
+    class SensorStateClass(enum.StrEnum):
+        MEASUREMENT = "measurement"
+        TOTAL = "total"
+        TOTAL_INCREASING = "total_increasing"
+
     def callback(func):
         return func
 
@@ -46,18 +61,17 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
         return lambda: None
 
     sensor.SensorEntity = SensorEntity
+    sensor.SensorDeviceClass = SensorDeviceClass
+    sensor.SensorStateClass = SensorStateClass
     config_entries.ConfigEntry = ConfigEntry
     const.UnitOfTemperature = UnitOfTemperature
+    const.EntityCategory = StubEntityCategory
     core.HomeAssistant = HomeAssistant
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    entity_platform.AddEntitiesCallback = object
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")
-
-    class StubEntityCategory(str, enum.Enum):
-        CONFIG = "config"
-        DIAGNOSTIC = "diagnostic"
-
     entity_helpers.EntityCategory = StubEntityCategory
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
@@ -69,6 +83,7 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity", entity_helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_platform", entity_platform)
 
 
 @dataclass

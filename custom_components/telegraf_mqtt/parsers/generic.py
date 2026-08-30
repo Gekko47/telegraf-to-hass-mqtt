@@ -10,11 +10,10 @@ from typing import Any
 
 from ..models import MetricDescriptor, MetricValue, frozen_tags
 from ..naming import (
-    infer_icon_key,
     resolve_entity_category,
     resolve_translation,
 )
-from .static import is_static_field
+from .static import static_cleanup_policy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +29,14 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
     descriptor. The parser sets ``translation_key`` and
     ``translation_placeholders``; the entity layer reads them and HA
     formats them via translations/en.json.
+
+    Phase 10: every descriptor carries ``cleanup_policy`` (a ``Literal``)
+    and ``platform_hint`` (also a ``Literal``). The platform hint defaults
+    to ``"auto"`` and is overridden by ``field_overrides[platform]`` in
+    the registry's ``_apply_overrides`` step. Setting it to ``"none"``
+    marks a field as excluded and the registry drops it before entity
+    routing; setting it to ``"sensor"`` or ``"binary_sensor"`` forces
+    the platform split regardless of the value's Python type.
     """
     measurement = payload.get("name")
     tags = payload.get("tags")
@@ -40,9 +47,13 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
         _LOGGER.debug("Unsupported Telegraf payload shape")
         return []
 
+    if timestamp is None:
+        _LOGGER.debug("Unsupported Telegraf payload shape")
+        return []
+
     try:
         timestamp_float = float(timestamp)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         _LOGGER.debug("Unsupported Telegraf payload shape")
         return []
 
@@ -72,10 +83,15 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 entity_category=resolve_entity_category(measurement, field),
                 # Phase 6: static system metadata (CPU model, vendor id, n_cpus,
                 # uptime_format, ...) is never cleaned up; everything else is AUTO.
-                cleanup_policy="NEVER" if is_static_field(measurement, field) else "AUTO",
+                # The literal strings come from const.py; static.py is the
+                # single place that decides the policy.
+                cleanup_policy=static_cleanup_policy(measurement, field),  # type: ignore[arg-type]
                 device_id=clean_tags.get("host", ""),
                 translation_key=translation_key,
                 translation_placeholders=MappingProxyType(dict(placeholders)),
+                # Phase 10: platform_hint is "auto" by default; the registry
+                # applies the user's field_override (if any) at update time.
+                platform_hint="auto",
             )
         )
 

@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SIGNAL_METRIC_UPDATED, SIGNAL_NEW_METRIC
+from .const import (
+    DOMAIN,
+    PLATFORM_HINT_SENSOR,
+    SIGNAL_METRIC_UPDATED,
+    SIGNAL_NEW_METRIC,
+)
+from .heuristics import ENTITY_CATEGORY_DIAGNOSTIC
 from .icons import ICON_FOR_KEY
-from .naming import ENTITY_CATEGORY_DIAGNOSTIC, infer_icon_key
+from .models import is_bool_metric
+from .naming import infer_icon_key
+from .registry import DeviceManager
 
 
 def _entity_category(value: str | None) -> EntityCategory | None:
@@ -21,7 +31,7 @@ def _entity_category(value: str | None) -> EntityCategory | None:
     return EntityCategory(value) if value else None
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up binary sensor entities from a config entry."""
     manager = entry.runtime_data.manager
     added: set[str] = set()
@@ -29,7 +39,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     @callback
     def add_metric(metric_key: str) -> None:
         state = manager.get_metric(metric_key)
-        if state is None or not isinstance(state.value, bool) or metric_key in added:
+        if state is None or metric_key in added:
+            return
+        # Phase 10 platform routing: only bool values land here (the
+        # registry coerces 0/1 and strings when an override requests the
+        # binary_sensor platform), and a field the user forced onto the
+        # sensor platform is excluded so the two platforms stay disjoint.
+        if not is_bool_metric(state.value) or state.descriptor.platform_hint == PLATFORM_HINT_SENSOR:
             return
         added.add(metric_key)
         async_add_entities([TelegrafMqttBinarySensor(entry, metric_key)])
@@ -56,7 +72,10 @@ class TelegrafMqttBinarySensor(BinarySensorEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_translation_key: str | None = None
-    _attr_translation_placeholders: dict[str, str] | None = None
+    # HA's base ``Entity`` types this as ``Mapping[str, str]`` although
+    # ``None`` is the de-facto unset value; the ignore pins the runtime
+    # contract the entity code relies on.
+    _attr_translation_placeholders: Mapping[str, str] | None = None  # type: ignore[assignment]
     _attr_entity_registry_enabled_default: bool = True
 
     def __init__(self, entry: ConfigEntry, metric_key: str) -> None:
@@ -65,8 +84,11 @@ class TelegrafMqttBinarySensor(BinarySensorEntity):
         self._refresh_descriptor_attributes()
 
     @property
-    def _manager(self):
-        return self._entry.runtime_data.manager
+    def _manager(self) -> DeviceManager:
+        # ``ConfigEntry.runtime_data`` is untyped from HA's side; the
+        # integration guarantees a ``TelegrafMqttRuntimeData`` here.
+        manager: DeviceManager = self._entry.runtime_data.manager
+        return manager
 
     def _refresh_descriptor_attributes(self) -> None:
         state = self._manager.get_metric(self._metric_key)
@@ -77,9 +99,7 @@ class TelegrafMqttBinarySensor(BinarySensorEntity):
         self._attr_translation_key = descriptor.translation_key
         self._attr_translation_placeholders = dict(descriptor.translation_placeholders)
         self._attr_entity_category = _entity_category(descriptor.entity_category)
-        self._attr_entity_registry_enabled_default = (
-            descriptor.entity_category != ENTITY_CATEGORY_DIAGNOSTIC
-        )
+        self._attr_entity_registry_enabled_default = descriptor.entity_category != ENTITY_CATEGORY_DIAGNOSTIC
         self._attr_icon = ICON_FOR_KEY.get(
             infer_icon_key(descriptor.measurement, descriptor.field),
             ICON_FOR_KEY["binary"],

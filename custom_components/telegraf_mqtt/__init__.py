@@ -20,31 +20,43 @@ try:
         async_dispatcher_connect,
         async_dispatcher_send,
     )
-    from homeassistant.helpers.event import async_track_time_interval
+    from homeassistant.helpers.event import (
+        async_track_time_interval,
+    )
 except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test import isolation
-    ConfigEntry = object
-    Platform = None
-    HomeAssistant = object
-    callback = lambda target: target  # noqa: E731 - identity when HA is absent
-    mqtt = None
-    async_dispatcher_connect = None
-    async_dispatcher_send = None
-    async_track_time_interval = None
-    ConfigEntryNotReady = Exception
-    er = None
-    ir = None
+    # Import-isolation fallback: the same names exist with permissive
+    # types so the module still imports (and is unit-testable) without a
+    # running Home Assistant. Each assignment silences mypy for exactly
+    # the type it replaces; the ``is not None`` runtime guards make the
+    # narrowed shapes safe.
+    ConfigEntry = object  # type: ignore[misc,assignment]
+    Platform = None  # type: ignore[misc,assignment]
+    HomeAssistant = object  # type: ignore[misc,assignment]
+    callback = lambda target: target  # type: ignore[assignment]  # noqa: E731 - identity when HA is absent
+    mqtt = None  # type: ignore[assignment]
+    async_dispatcher_connect = None  # type: ignore[assignment]
+    async_dispatcher_send = None  # type: ignore[assignment]
+    async_track_time_interval = None  # type: ignore[assignment]
+    ConfigEntryNotReady = Exception  # type: ignore[misc,assignment]
+    er = None  # type: ignore[assignment]
+    ir = None  # type: ignore[assignment]
 
 from .const import (
+    CONF_AUTO_DISCOVER,
+    CONF_CATEGORY_OVERRIDES,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
+    CONF_DEVICE_ID_STRATEGY,
     CONF_ENABLE_CLEANUP,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
     CONF_MIN_ACTIVE_METRICS,
     CONF_TOPIC_PATTERN,
+    DEFAULT_AUTO_DISCOVER,
     DEFAULT_CLEANUP_DELAY,
     DEFAULT_DELETE_DELAY,
+    DEFAULT_DEVICE_ID_STRATEGY,
     DEFAULT_ENABLE_CLEANUP,
     DEFAULT_EXPIRE_AFTER,
     DEFAULT_MIN_ACTIVE_METRICS,
@@ -53,18 +65,18 @@ from .const import (
     SIGNAL_NEW_DEVICE,
     SIGNAL_NEW_METRIC,
     SIGNAL_REMOVE_METRIC,
-)
-from .exceptions import (
-    MqttBrokerUnreachable,
-    ReconfigureSubscribeFailed,
-    TelegrafMqttException,
+    VALID_DEVICE_ID_STRATEGIES,
 )
 from .parser import ParserStats, TelegrafParser
 from .registry import DeviceManager
 from .repairs import (
+    check_device_id_collision,
+    check_device_id_conflict,
     check_invalid_persisted_option,
+    check_no_traffic,
     check_overlapping_topics,
 )
+from .snoop import SnoopListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,28 +87,29 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR] if Platform is not None el
 class TelegrafMqttRuntimeData:
     """Runtime state for a config entry."""
 
-    manager: DeviceManager
+    manager: DeviceManager | None
     parser: TelegrafParser
     parser_stats: Any  # ``custom_components.telegraf_mqtt.parser.ParserStats``
     manufacturer: str | None
     model: str | None
     sw_version: str | None = None
     unsubscribe: Callable[[], None] | None = None
+    unsubscribe_snoop: Callable[[], None] | None = None
     cancel_expiry: Callable[[], None] | None = None
 
 
-def MqttBrokerUnreachable(topic: str, error: str) -> ConfigEntryNotReady:
+def _broker_unreachable_not_ready(topic: str, error: str) -> ConfigEntryNotReady:
     """Build a ``ConfigEntryNotReady`` for an unreachable MQTT broker.
 
-    Shared by the probe and real subscription error paths in
+    Shared by the wait-precheck and real subscription error paths in
     ``async_setup_entry`` so the toast text, translation domain/key, and
     topic/error placeholders stay in sync. The caller is responsible for
     raising the result with ``raise ... from <err>`` to preserve exception
-    chaining.
+    chaining. (``exceptions.MqttBrokerUnreachable`` is the typed exception
+    used by tests and the reconfigure flow; setup must convert to
+    ``ConfigEntryNotReady`` so HA retries instead of failing hard.)
     """
-    ready_exc = ConfigEntryNotReady(
-        f"Could not subscribe to {topic}: {error}"
-    )
+    ready_exc = ConfigEntryNotReady(f"Could not subscribe to {topic}: {error}")
     ready_exc.translation_domain = DOMAIN
     ready_exc.translation_key = "mqtt_broker_unreachable"
     ready_exc.translation_placeholders = {"topic": topic, "error": error}
@@ -108,9 +121,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tolerate invalid persisted options: a corrupted value falls back
     # to the default AND raises a Repair issue so the user can correct
     # it from the UI without the entry failing to set up.
-    options, invalid_options = _options_from_entry_with_repair(
-        hass, entry
-    )
+    # ``_options_from_entry_with_repair`` already surfaces invalid persisted
+    # options as Repairs issues; the second tuple element is not needed here.
+    options, _invalid_options = _options_from_entry_with_repair(hass, entry)
     parser_stats = ParserStats()
     parser = TelegrafParser(stats=parser_stats)
     manager = DeviceManager(
@@ -122,6 +135,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         enable_cleanup=options.enable_cleanup,
         min_active_metrics=options.min_active_metrics,
         parser=parser,
+        category_overrides=options.category_overrides,
+        device_id_strategy=options.device_id_strategy,
     )
     entry.runtime_data = TelegrafMqttRuntimeData(
         manager=manager,
@@ -144,36 +159,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def message_received(message: Any) -> None:
             manager.process_message(message.topic, message.payload)
 
-        # Phase 5 test-before-setup: validate the MQTT subscription before the
-        # entry is considered "set up". A short-lived probe subscribes to the
-        # configured topic with a no-op callback and immediately unsubscribes;
-        # a successful SUBSCRIBE-ACK confirms the broker is reachable and
-        # authorized for the topic. On failure we raise ``ConfigEntryNotReady``
-        # so HA surfaces a retry-able error to the user instead of
-        # half-configuring the entry.
-        def _on_probe_message(_message: Any) -> None:  # pragma: no cover - probe is purely a SUBSCRIBE-ACK check; the callback never fires
-            pass
+        # Phase 10: ``mqtt.async_wait_for_mqtt_client`` is the canonical
+        # precheck on HA 2026.6 -- the broker either has an active
+        # connection or we raise ``ConfigEntryNotReady`` for HA to retry.
+        # We no longer do the SUBSCRIBE-ACK probe; the wait + the real
+        # ``async_subscribe`` are sufficient to surface broker reachability.
+        # The precheck is optional -- older HA test doubles (and earlier
+        # versions of this integration's own test fakes) don't expose it,
+        # so we fall back to a direct subscribe and rely on the standard
+        # MQTT error path.
+        if hasattr(mqtt, "async_wait_for_mqtt_client"):
+            try:
+                await mqtt.async_wait_for_mqtt_client(hass)
+            except Exception as wait_err:
+                raise _broker_unreachable_not_ready(topic_pattern, str(wait_err)) from wait_err
 
         try:
-            probe_unsubscribe = await mqtt.async_subscribe(
-                hass, topic_pattern, _on_probe_message
-            )
-        except Exception as probe_err:  # noqa: BLE001 - broker errors vary, surface uniformly
-            # Phase 9: ConfigEntryNotReady accepts translation_domain +
-            # translation_key + translation_placeholders for the toast.
-            raise MqttBrokerUnreachable(topic_pattern, str(probe_err)) from probe_err
-        probe_unsubscribe()
-        _LOGGER.debug(
-            "MQTT subscribe probe OK for %s; installing real subscription", topic_pattern
-        )
-
-        try:
-            entry.runtime_data.unsubscribe = await mqtt.async_subscribe(
-                hass, topic_pattern, message_received
-            )
-        except Exception as real_err:  # pragma: no cover - the probe guards broker reachability; this arm is only reachable on a connection drop between SUBSCRIBE-ACKs
-            raise MqttBrokerUnreachable(topic_pattern, str(real_err)) from real_err
+            entry.runtime_data.unsubscribe = await mqtt.async_subscribe(hass, topic_pattern, message_received)
+        except Exception as real_err:
+            raise _broker_unreachable_not_ready(topic_pattern, str(real_err)) from real_err
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
+
+        # Phase 10: post-setup snoop listener. Runs only when the user
+        # has the auto-discover option enabled (default on). The
+        # listener installs a second subscription on a wildcard topic
+        # and hands every captured message back to ``manager.process_message``
+        # so newly-seen Telegraf hosts become real devices and entities
+        # without the user having to add another config entry. The
+        # unsubscribe handle is stored on the runtime data and torn down
+        # in ``async_unload_entry``. The Repairs framework consults
+        # ``manager.seen_hosts`` + ``seen_topics`` to raise a hint when
+        # the configured topic pattern matches no traffic.
+        if options.auto_discover:
+            # The dispatcher signature matches
+            # ``DeviceManager.process_message(topic, payload)`` exactly,
+            # so the snoop can re-inject every captured message into
+            # the integration's primary parse -> route -> render
+            # pipeline. The ``manager.record_seen_host`` call inside
+            # ``process_message`` keeps ``seen_hosts`` in sync with the
+            # live state, which ``check_no_traffic`` consults for the
+            # Repairs hint.
+            snoop = SnoopListener(
+                timeout_seconds=0.0,
+                dispatcher=manager.process_message,
+            )
+            try:
+                await snoop.start(hass, mqtt.async_subscribe)
+            except Exception as snoop_err:
+                # Snoop failure is non-fatal -- the main subscription
+                # is the user-facing path; we just log and move on.
+                _LOGGER.debug("Snoop listener failed to start: %s", snoop_err)
+                snoop.stop()
+            else:
+                entry.runtime_data.unsubscribe_snoop = snoop.stop
 
     if Platform is not None:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -193,6 +231,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # creates nothing. Same for invalid-persisted-option checks via
     # _options_from_entry_with_repair above.
     check_overlapping_topics(hass, entry)
+    # Phase 10: Repairs for runtime-detected problems. ``check_no_traffic``
+    # is invoked from inside the periodic expiry callback (see
+    # ``_schedule_expiry_check``) so the snoop listener has time to
+    # receive messages before we flag the topic pattern as silent.
+    # ``check_device_id_collision`` fires when two distinct host tags
+    # collapse onto the same device_id slug. ``check_device_id_conflict``
+    # fires when two config entries produced the same device_id from
+    # different topic patterns.
+    check_device_id_collision(hass, entry)
+    check_device_id_conflict(hass, entry)
 
     return True
 
@@ -206,6 +254,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok and runtime_data.unsubscribe is not None:
         runtime_data.unsubscribe()
         runtime_data.unsubscribe = None
+    if unload_ok and runtime_data.unsubscribe_snoop is not None:
+        runtime_data.unsubscribe_snoop()
+        runtime_data.unsubscribe_snoop = None
     if unload_ok and runtime_data.cancel_expiry is not None:
         runtime_data.cancel_expiry()
         runtime_data.cancel_expiry = None
@@ -219,6 +270,10 @@ class TelegrafMqttOptions:
     Phase 6: ``enable_cleanup``, ``cleanup_delay``, ``delete_delay`` and
     ``min_active_metrics`` are all user-facing (OptionsFlow). ``expire_after``
     is unchanged from Phase 2.
+
+    Phase 10: ``category_overrides`` and ``device_id_strategy`` are
+    user-facing. ``auto_discover`` is also user-facing (default on) and
+    controls whether the post-setup snoop listener runs.
     """
 
     expire_after: int
@@ -228,6 +283,9 @@ class TelegrafMqttOptions:
     cleanup_delay: int
     delete_delay: int
     min_active_metrics: int
+    category_overrides: dict[str, str | None]
+    device_id_strategy: str
+    auto_discover: bool
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -241,13 +299,15 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         min_active_metrics=options.min_active_metrics,
         cleanup_delay=options.cleanup_delay,
         delete_delay=options.delete_delay,
+        category_overrides=options.category_overrides,
+        device_id_strategy=options.device_id_strategy,
         on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
     )
     _schedule_expiry_check(hass, entry)
 
 
 def _coerce_int_option(
-    raw_options: dict,
+    raw_options: dict[str, Any],
     key: str,
     default: int,
     *,
@@ -263,22 +323,18 @@ def _coerce_int_option(
     if key not in raw_options:
         return default, False
     raw = raw_options[key]
-    if isinstance(raw, bool) or (
-        isinstance(raw, float) and not raw.is_integer()
-    ):
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
         return default, True
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default, True
     if value < minimum:
         return default, True
     return value, False
 
 
-def _coerce_bool_option(
-    raw_options: dict, key: str, default: bool
-) -> tuple[bool, bool]:
+def _coerce_bool_option(raw_options: dict[str, Any], key: str, default: bool) -> tuple[bool, bool]:
     if key not in raw_options:
         return default, False
     value = raw_options[key]
@@ -301,53 +357,60 @@ def _normalize_options(
     """
     invalid: list[str] = []
 
-    expire_after, bad = _coerce_int_option(
-        raw_options, CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER, minimum=1
-    )
+    expire_after, bad = _coerce_int_option(raw_options, CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER, minimum=1)
     if bad:
         invalid.append(CONF_EXPIRE_AFTER)
 
-    cleanup_delay, bad = _coerce_int_option(
-        raw_options, CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY
-    )
+    cleanup_delay, bad = _coerce_int_option(raw_options, CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)
     if bad:
         invalid.append(CONF_CLEANUP_DELAY)
 
-    delete_delay, bad = _coerce_int_option(
-        raw_options, CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY
-    )
+    delete_delay, bad = _coerce_int_option(raw_options, CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)
     if bad:
         invalid.append(CONF_DELETE_DELAY)
 
-    min_active_metrics, bad = _coerce_int_option(
-        raw_options, CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS
-    )
+    min_active_metrics, bad = _coerce_int_option(raw_options, CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)
     if bad:
         invalid.append(CONF_MIN_ACTIVE_METRICS)
 
-    enable_cleanup, bad = _coerce_bool_option(
-        raw_options, CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP
-    )
+    enable_cleanup, bad = _coerce_bool_option(raw_options, CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)
     if bad:
         invalid.append(CONF_ENABLE_CLEANUP)
 
+    # Validate the persisted device_id_strategy against the known set so a
+    # corrupted value (typo, empty string, old/missing entry) cannot reach
+    # DeviceManager -- it would otherwise fall back to the default silently
+    # inside the registry and the user would never see a Repair issue.
+    raw_device_id_strategy = raw_options.get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)
+    device_id_strategy = (
+        raw_device_id_strategy if raw_device_id_strategy in VALID_DEVICE_ID_STRATEGIES else DEFAULT_DEVICE_ID_STRATEGY
+    )
+    if device_id_strategy != raw_device_id_strategy:
+        invalid.append(CONF_DEVICE_ID_STRATEGY)
+
+    auto_discover, bad = _coerce_bool_option(raw_options, CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)
+    if bad:
+        invalid.append(CONF_AUTO_DISCOVER)
+
     options = TelegrafMqttOptions(
         expire_after=expire_after,
-        exclude_patterns=tuple(
-            str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])
-        ),
+        exclude_patterns=tuple(str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])),
         field_overrides=dict(raw_options.get(CONF_FIELD_OVERRIDES, {})),
         enable_cleanup=enable_cleanup,
         cleanup_delay=cleanup_delay,
         delete_delay=delete_delay,
         min_active_metrics=min_active_metrics,
+        category_overrides={
+            str(key): (None if value in (None, "") else str(value))
+            for key, value in dict(raw_options.get(CONF_CATEGORY_OVERRIDES, {})).items()
+        },
+        device_id_strategy=device_id_strategy,
+        auto_discover=auto_discover,
     )
     return options, invalid
 
 
-def _options_from_entry_with_repair(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> tuple[TelegrafMqttOptions, list[str]]:
+def _options_from_entry_with_repair(hass: HomeAssistant, entry: ConfigEntry) -> tuple[TelegrafMqttOptions, list[str]]:
     """Normalize config entry options, surfacing invalid ones as a Repair issue.
 
     Returns a tuple of ``(options, list_of_invalid_keys)``. Setup still
@@ -409,6 +472,14 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ):
             _dispatch_remove_metric(hass, entry, removed_key)
         runtime_data.manager.prune_empty_devices()
+        # Phase 10: surface a Repairs hint if the snoop listener has had
+        # at least one tick and no message matched the configured topic
+        # pattern. Running this from the periodic callback (rather than
+        # ``async_setup_entry``) gives the snoop listener time to receive
+        # messages before we flag the topic as silent. ``check_no_traffic``
+        # is idempotent, so repeated ticks just refresh / auto-resolve the
+        # issue as traffic state changes.
+        check_no_traffic(hass, entry)
 
     runtime_data.cancel_expiry = async_track_time_interval(hass, check_expiry, timedelta(seconds=interval_seconds))
 
@@ -450,7 +521,7 @@ def _dispatch_remove_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key:
         )
 
 
-def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry):
+def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry) -> Callable[[str, str], None]:
     """Build the device-discovery callback that announces a newly seen host."""
 
     def on_new_device(device_id: str, device_name: str) -> None:
@@ -484,9 +555,7 @@ def remove_metric_entity(hass: HomeAssistant, composite_key: str) -> bool:
     return False
 
 
-def _listener_remove_metric(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> Callable[..., Any]:
+def _listener_remove_metric(hass: HomeAssistant, entry: ConfigEntry) -> Callable[..., Any]:
     """Build the dispatcher listener that turns ``SIGNAL_REMOVE_METRIC`` into
     an entity-registry removal.
 

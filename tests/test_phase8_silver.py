@@ -31,12 +31,10 @@ import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
     CONF_DEVICE_NAME,
     CONF_TOPIC_PATTERN,
-    DOMAIN,
 )
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.parser import ParserStats, TelegrafParser
 from custom_components.telegraf_mqtt.registry import DeviceManager, MetricRegistry
-
 
 # ---------------------------------------------------------------------------
 # FakeHass / FakeConfigEntry / FakeMqtt / _patch
@@ -89,9 +87,7 @@ class FakeMqtt:
         self.subscribe_calls: list[tuple[str, Callable[..., Any]]] = []
         self.unsubscribe_calls: int = 0
 
-    async def async_subscribe(
-        self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]
-    ) -> Callable[[], None]:
+    async def async_subscribe(self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]) -> Callable[[], None]:
         self.subscribe_calls.append((topic_pattern, callback))
         return self.unsubscribe
 
@@ -195,9 +191,7 @@ def test_transition_logs_via_device_manager(caplog: pytest.LogCaptureFixture) ->
     """The DeviceManager (the production path) routes messages and fires the
     same transition logging through the per-device registries."""
     clock = [100.0]
-    manager = DeviceManager(
-        expire_after=5, clock=lambda: clock[0], device_name="Telegraf MQTT"
-    )
+    manager = DeviceManager(expire_after=5, clock=lambda: clock[0], device_name="Telegraf MQTT")
     manager.set_parser(TelegrafParser())
     manager.process_message(
         "telegraf/host1/mem",
@@ -233,9 +227,7 @@ def test_device_manager_unchanged_value_does_not_log_unavailable(
     does not produce a 'went unavailable' log -- the metric stays available
     because ``update`` keeps ``last_updated`` current."""
     clock = [100.0]
-    manager = DeviceManager(
-        expire_after=5, clock=lambda: clock[0], device_name="Telegraf MQTT"
-    )
+    manager = DeviceManager(expire_after=5, clock=lambda: clock[0], device_name="Telegraf MQTT")
     manager.set_parser(TelegrafParser())
     payload = json.dumps(
         {
@@ -364,7 +356,7 @@ def test_double_unload_is_clean_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_reload_restores_fresh_runtime_and_parser_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     """After unload + re-setup the runtime_data and ParserStats are fresh
     (a reconnect does not carry stale state from a previous life)."""
-    fake_mqtt = _patch(monkeypatch)
+    _patch(monkeypatch)
     hass = FakeHass()
     entry = FakeConfigEntry()
 
@@ -409,9 +401,12 @@ def test_broker_resubscribe_tolerates_drop_and_processes_messages(
             self.topic = topic
             self.payload = payload
 
-    # First life: fire through the real subscription callback (call 2).
-    # ``message_received`` is async, so drive it to completion with asyncio.run.
-    real_cb = fake_mqtt.subscribe_calls[1][1]
+    # First life: fire through the real subscription callback. With
+    # the Phase 10 snoop enabled, setup installs two subscriptions:
+    # call 0 is the real one (the critical user-facing path is
+    # established first), call 1 is the snoop. ``message_received``
+    # is async, so drive it to completion with asyncio.run.
+    real_cb = fake_mqtt.subscribe_calls[0][1]
     asyncio.run(real_cb(_Msg("telegraf/host1/mem", json.dumps(_payload("mem")))))
     assert entry.runtime_data.parser_stats.received == 1
 
@@ -419,9 +414,10 @@ def test_broker_resubscribe_tolerates_drop_and_processes_messages(
     # we model as a fresh setup. The integration must not raise on the drop.
     asyncio.run(integration.async_unload_entry(hass, entry))
 
-    # Reconnect: a new setup installs a fresh real subscription (call 4).
+    # Reconnect: a new setup installs fresh real + snoop subscriptions
+    # (calls 2 and 3).
     asyncio.run(integration.async_setup_entry(hass, entry))
-    new_real_cb = fake_mqtt.subscribe_calls[3][1]
+    new_real_cb = fake_mqtt.subscribe_calls[2][1]
     assert new_real_cb is not real_cb
     asyncio.run(new_real_cb(_Msg("telegraf/host1/mem", json.dumps(_payload("mem")))))
     # The fresh ParserStats is back to a clean slate after reconnect.
@@ -436,7 +432,6 @@ def test_broker_resubscribe_tolerates_drop_and_processes_messages(
 
 
 def test_codeowners_file_exists_and_names_owner() -> None:
-    import sys
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]

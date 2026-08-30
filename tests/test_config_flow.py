@@ -96,6 +96,7 @@ async def test_reconfigure_flow_rejects_invalid_topic(hass) -> None:
     """The reconfigure step surfaces a form with ``invalid_topic`` error
     when the user submits a syntactically invalid MQTT topic pattern."""
     from homeassistant.config_entries import SOURCE_RECONFIGURE  # type: ignore[attr-defined]
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Telegraf",
@@ -123,6 +124,7 @@ async def test_reconfigure_flow_requires_device_name(hass) -> None:
     """The reconfigure step surfaces a form with ``required`` error
     when the user submits an empty device name."""
     from homeassistant.config_entries import SOURCE_RECONFIGURE  # type: ignore[attr-defined]
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Telegraf",

@@ -14,7 +14,6 @@ counting ``on_write``; no HA event loop, no entity objects, no timing flakiness.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import Any
 
 from custom_components.telegraf_mqtt.parser import TelegrafParser
@@ -69,7 +68,7 @@ def test_sustains_100_entities_at_1hz_with_bounded_writes() -> None:
 
     for step in range(10):
         for device in devices:
-            for i, metric in enumerate(metrics):
+            for i, _metric in enumerate(metrics):
                 value = float(step * 100 + i)  # unique value per tick -> real change
                 topic, payload = _message(device, "mem", f"used_percent_{i}", value)
                 manager.process_message(topic, payload)
@@ -88,7 +87,6 @@ def test_repeated_identical_values_produce_no_extra_writes() -> None:
     counter = _WriteCounter()
     manager = _build_manager(counter)
 
-    metric = "mem_used_percent_0"
     topic, payload = _message("host-a", "mem", "used_percent_0", 42.0)
     for _ in range(50):
         manager.process_message(topic, payload)  # identical payload, 50 times

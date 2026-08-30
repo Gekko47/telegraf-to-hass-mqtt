@@ -1,3 +1,4 @@
+import enum
 import importlib
 import json
 import sys
@@ -119,6 +120,7 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
     core = types.ModuleType("homeassistant.core")
     device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
     helpers = types.ModuleType("homeassistant.helpers")
 
     class BinarySensorEntity:
@@ -140,20 +142,29 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
     class UnitOfTemperature:
         CELSIUS = "°C"
 
+    class StubEntityCategory(enum.StrEnum):
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
     def callback(func):
         return func
 
     def async_dispatcher_connect(hass, signal, target):
         return lambda: None
 
+    def add_entities(entities) -> None:
+        return None
+
     binary_sensor.BinarySensorEntity = BinarySensorEntity
     sensor.SensorEntity = SensorEntity
     config_entries.ConfigEntry = ConfigEntry
     const.UnitOfTemperature = UnitOfTemperature
+    const.EntityCategory = StubEntityCategory
     core.HomeAssistant = HomeAssistant
     core.callback = callback
     device_registry.DeviceInfo = DeviceInfo
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    entity_platform.AddEntitiesCallback = add_entities
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
     monkeypatch.setitem(sys.modules, "homeassistant.components.binary_sensor", binary_sensor)
@@ -164,6 +175,7 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.dispatcher", dispatcher)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_platform", entity_platform)
 
 
 @dataclass
@@ -261,3 +273,112 @@ def test_repository_has_hacs_branding_assets() -> None:
     assert Path("logo.png").exists()
     assert Path("custom_components/telegraf_mqtt/brand/icon.png").exists()
     assert Path("custom_components/telegraf_mqtt/brand/logo.png").exists()
+
+
+def test_readme_documents_xdist_fast_path() -> None:
+    """README must point local devs at the pytest-xdist fast invocation.
+
+    Phase 10 cost-cut: 390 tests, sequential + coverage = ~2:05 on the dev
+    box; with ``-n auto`` that drops to ~0:52 (≈2.5x). The CI gate keeps the
+    sequential run for deterministic coverage output, so the README is the
+    only place this discovery surface lives.
+    """
+    readme = Path("README.md").read_text(encoding="utf-8")
+    assert "pytest -n auto" in readme
+    assert "pytest-xdist" in readme
+
+
+def test_pyproject_documents_xdist_invocation() -> None:
+    """``pyproject.toml`` must keep the recommended invocations in sync.
+
+    The ``[tool.pytest.ini_options]`` table is the canonical place future
+    maintainers look when investigating a slow CI run. If the section
+    silently drops the xdist example, this test fails.
+    """
+    text = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.pytest.ini_options]" in text
+    assert "pytest -n auto" in text
+    assert 'asyncio_mode = "auto"' in text
+
+
+def test_placeholder_binary_sensor_stubs_are_self_contained(monkeypatch) -> None:
+    """Regression: the placeholder HA stubs must not depend on sibling tests.
+
+    Under sequential ``pytest`` the ``homeassistant.const`` module picks up
+    ``EntityCategory`` from whichever test ran first. Under ``pytest -n auto``
+    the modules are isolated per worker, so any missing name in
+    ``_install_binary_sensor_homeassistant_stubs`` surfaces as an
+    ``ImportError`` only on sharded runs. This test pins the
+    self-contained shape so the bug never regresses.
+    """
+    # Run the placeholder helper against an isolated ``sys.modules`` slice so
+    # the assertions below observe exactly what it registered, not whatever
+    # an earlier sibling test (or the conftest helper) left behind. We
+    # snapshot every ``homeassistant.*`` name the helper might touch,
+    # actively evict them from ``sys.modules`` for the duration of the test,
+    # and restore them on exit so we never leak stubs into harness-based
+    # tests that run afterwards. Without the eviction, names the real HA
+    # package already populated (entity_platform, const, ...) would mask a
+    # missing ``monkeypatch.setitem`` in the helper.
+    expected_module_names = (
+        "homeassistant.components",
+        "homeassistant.components.binary_sensor",
+        "homeassistant.components.sensor",
+        "homeassistant.config_entries",
+        "homeassistant.const",
+        "homeassistant.core",
+        "homeassistant.helpers",
+        "homeassistant.helpers.device_registry",
+        "homeassistant.helpers.dispatcher",
+        "homeassistant.helpers.entity_platform",
+    )
+    saved_modules = {name: sys.modules.pop(name, None) for name in expected_module_names}
+    try:
+        _install_binary_sensor_homeassistant_stubs(monkeypatch)
+
+        for name in expected_module_names:
+            assert name in sys.modules, (
+                f"_install_binary_sensor_homeassistant_stubs() failed to "
+                f"register {name!r}; re-add the monkeypatch.setitem call so "
+                f"the suite stays xdist-safe."
+            )
+
+        # The specific attributes that broke when xdist sharded the suite:
+        # the helper must define them on the modules it registers, not rely
+        # on a previous test (or the conftest helper) having populated them.
+        const_module = sys.modules["homeassistant.const"]
+        entity_platform_module = sys.modules["homeassistant.helpers.entity_platform"]
+        assert hasattr(const_module, "EntityCategory"), (
+            "homeassistant.const is missing EntityCategory; "
+            "_install_binary_sensor_homeassistant_stubs() must set it so "
+            "binary_sensor.py can resolve the import under pytest-xdist."
+        )
+        assert hasattr(entity_platform_module, "AddEntitiesCallback"), (
+            "homeassistant.helpers.entity_platform is missing "
+            "AddEntitiesCallback; _install_binary_sensor_homeassistant_stubs() "
+            "must set it so binary_sensor.py can resolve the import under "
+            "pytest-xdist."
+        )
+
+        # Secondary guard: the canonical conftest helper is the reference
+        # for everything else sensor.py / binary_sensor.py import. Keep the
+        # cross-check so adding a name to the placeholder helper without
+        # updating conftest still surfaces.
+        from conftest import _build_ha_stub_modules  # type: ignore[import-not-found]
+
+        placeholder_names = set(expected_module_names)
+        canonical = _build_ha_stub_modules()
+        missing = placeholder_names - set(canonical)
+        assert not missing, (
+            f"Placeholder test_placeholder.py binary-sensor stubs are missing "
+            f"these modules from the canonical conftest helper: {sorted(missing)}. "
+            f"Re-add them so the suite stays xdist-safe."
+        )
+    finally:
+        # Restore the pre-test sys.modules state so we never leak the
+        # placeholder stubs into harness-based tests that run afterwards.
+        for name, saved in saved_modules.items():
+            if saved is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = saved

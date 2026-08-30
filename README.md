@@ -195,7 +195,7 @@ Telegraf publishes:
 ```json
 {
   "name": "cpu",
-  "tags": {"host": "cachyos-gekko", "cpu": "cpu-total"},
+  "tags": {"host": "host-a", "cpu": "cpu-total"},
   "fields": {"usage_idle": 88.4, "usage_user": 7.1},
   "timestamp": 1721664000
 }
@@ -206,16 +206,16 @@ Result:
 - A device is auto-created under the entry's `device_name` with `manufacturer`,
   `model`, and `sw_version` from the config flow.
 - One sensor entity per field:
-  - `sensor.cachyos_gekko_cpu_cpu_total_usage_idle` — `CPU CPU Total Usage Idle`
+  - `sensor.host_a_cpu_cpu_total_usage_idle` — `CPU CPU Total Usage Idle`
     (icon: `mdi:cpu-64-bit`), unit inferred as none, state class `measurement`.
-  - `sensor.cachyos_gekko_cpu_cpu_total_usage_user` — `CPU CPU Total Usage User`.
+  - `sensor.host_a_cpu_cpu_total_usage_user` — `CPU CPU Total Usage User`.
 
 **Example 2 — a disk usage metric (diagnostic, disabled by default)**
 
 ```json
 {
   "name": "disk",
-  "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+  "tags": {"host": "host-a", "path": "/", "fstype": "ext4"},
   "fields": {"used_percent": 63.5, "free": 128849018880},
   "timestamp": 1721664000
 }
@@ -224,9 +224,9 @@ Result:
 Result:
 
 - Two sensor entities, both **disabled by default** (disk is diagnostic):
-  - `sensor.cachyos_gekko_disk_root_used_percent` — `Disk Root Used Percent`
+  - `sensor.host_a_disk_root_used_percent` — `Disk Root Used Percent`
     (icon: `mdi:harddisk`), unit `%`, entity category `diagnostic`, **off by default**.
-  - `sensor.cachyos_gekko_disk_ext4_root_free` — `Disk Root Free`, unit none.
+  - `sensor.host_a_disk_ext4_root_free` — `Disk Root Free`, unit none.
 - Enable them from Settings -> Devices & Services -> Entities -> select each entity
   -> "Enable entity".
 
@@ -235,7 +235,7 @@ Result:
 ```json
 {
   "name": "battery",
-  "tags": {"host": "cachyos-gekko", "state": "discharging"},
+  "tags": {"host": "host-a", "state": "discharging"},
   "fields": {"percentage": 87.0, "voltage": 11.4},
   "timestamp": 1721664000
 }
@@ -245,9 +245,9 @@ Result:
 
 - A `binary_sensor` for the boolean field if the measurement contains one.
 - Two sensors for the numeric fields:
-  - `sensor.cachyos_gekko_battery_discharging_percentage` — `Battery Percentage`,
+  - `sensor.host_a_battery_discharging_percentage` — `Battery Percentage`,
     device class `battery`.
-  - `sensor.cachyos_gekko_battery_discharging_voltage` — `Battery Voltage`,
+  - `sensor.host_a_battery_discharging_voltage` — `Battery Voltage`,
     device class `voltage`.
 
 ### Use cases
@@ -338,6 +338,28 @@ The repository uses a local pytest-based regression suite.
 .\.venv\Scripts\python -m pytest -q
 ```
 
+### Fast sharded run (optional)
+
+For the TDD loop, shard the suite with `pytest-xdist` (install first if it
+is not already in your dev venv — it is not declared in `pyproject.toml`):
+
+```powershell
+# One-time: install the sharding plugin into the dev venv
+.\.venv\Scripts\python -m pip install pytest-xdist
+
+# TDD loop: sharded, no coverage (fastest, ~1 min on 12 cores)
+.\.venv\Scripts\python -m pytest -n auto
+
+# Local pre-commit: sharded, with coverage (~1 min)
+.\.venv\Scripts\python -m pytest -n auto --cov=custom_components.telegraf_mqtt
+
+# CI / full gate: sequential, with coverage (default, ~2 min)
+.\.venv\Scripts\python -m pytest -q
+```
+
+The sharded and sequential runs give identical results — the only difference
+is wall time (≈2× faster with coverage, ≈3-4× faster without).
+
 ### Coverage
 
 The suite runs with a **100% line-coverage gate** on `custom_components/telegraf_mqtt`
@@ -346,6 +368,25 @@ change with:
 
 ```powershell
 .\.venv\Scripts\python -m pytest --cov=custom_components.telegraf_mqtt --cov-report=term-missing --no-cov-on-fail
+```
+
+### Quality gates (Phase 10 — 🏆 Platinum)
+
+The integration targets Home Assistant's full quality scale, with **strict typing** as
+the final gate. Two extra tools run alongside the test suite on every change.
+
+| Gate | Command | Notes |
+|---|---|---|
+| Lint + format | `ruff check . && ruff format --check .` | Enforced in CI via the `prek` pre-commit framework. Auto-fixable: `ruff check --fix .` and `ruff format .`. |
+| Type check | `mypy --strict custom_components` | Enforced in CI. Pinned via `pyproject.toml` `[tool.mypy]`. All 27 source files must report `Success: no issues found`. |
+| Tests + 100% coverage | `pytest --cov=custom_components.telegraf_mqtt` | Enforced in CI. The Phase 10 / Platinum exit criterion: "Type checker runs in CI in strict mode and passes." |
+
+The `prek` (or `pre-commit`) install runs the same `ruff` checks locally before you push:
+
+```powershell
+.\.venv\Scripts\python -m pip install prek
+.\.venv\Scripts\prek install
+.\.venv\Scripts\prek run --all-files
 ```
 
 ### Main implementation areas
@@ -362,22 +403,23 @@ change with:
 - `custom_components/telegraf_mqtt/config_flow.py` — config, options, and reconfigure UI flow
 - `custom_components/telegraf_mqtt/diagnostics.py` — diagnostics download (redacted)
 - `custom_components/telegraf_mqtt/repairs.py` — Repairs issues
+- `custom_components/telegraf_mqtt/snoop.py` — post-setup auto-discover listener
 
 ## Roadmap alignment
 
 The repo is organized around a phased roadmap (see `.cline/ROADMAP.md`):
 
-- Phase 0: scaffolding, packaging metadata, CI, and the HA 2026.6.x platform floor
-- Phase 1: multi-device core pipeline (one Home Assistant device per Telegraf host)
-- Phase 2: options and availability behavior
-- Phase 3: measurement-aware naming and metadata resolution
-- Phase 4: units, statistics, and binary sensor projection
-- Phase 5: 🥉 Bronze quality-scale gate
-- Phase 6: intelligent cleanup and device lifecycle
-- Phase 7: diagnostics and repairs
-- Phase 8: 🥈 Silver gate (reliability hardening)
-- Phase 9: 🥇 Gold gate (translations, icons, docs depth)
-- Phase 10: 🏆 Platinum gate (strict typing) and HACS release
+- [x] Phase 0: scaffolding, packaging metadata, CI, and the HA 2026.6.x platform floor
+- [x] Phase 1: multi-device core pipeline (one Home Assistant device per Telegraf host)
+- [x] Phase 2: options and availability behavior
+- [x] Phase 3: measurement-aware naming and metadata resolution
+- [x] Phase 4: units, statistics, and binary sensor projection
+- [x] Phase 5: 🥉 Bronze quality-scale gate
+- [x] Phase 6: intelligent cleanup and device lifecycle
+- [x] Phase 7: diagnostics and repairs
+- [x] Phase 8: 🥈 Silver gate (reliability hardening)
+- [x] Phase 9: 🥇 Gold gate (translations, icons, docs depth)
+- [x] Phase 10: 🏆 Platinum gate (strict typing, mypy --strict in CI) and HACS release (1.2.0)
 
 ## License
 

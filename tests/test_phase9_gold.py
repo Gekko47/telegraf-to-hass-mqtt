@@ -27,12 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
-
-import pytest
 
 import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
@@ -52,13 +49,12 @@ from custom_components.telegraf_mqtt.naming import (
     TK_GENERIC_FIELD,
     resolve_translation,
 )
-from custom_components.telegraf_mqtt.parser import ParserStats, TelegrafParser
-from custom_components.telegraf_mqtt.registry import DeviceManager, MetricRegistry
+from custom_components.telegraf_mqtt.parser import TelegrafParser
+from custom_components.telegraf_mqtt.registry import DeviceManager
 from custom_components.telegraf_mqtt.translations_strings import (
     all_translation_keys,
     format_translation,
 )
-
 
 # ---------------------------------------------------------------------------
 # FakeHass / FakeConfigEntry / FakeMqtt
@@ -122,9 +118,7 @@ class FakeMqtt:
         self.unsubscribe_calls: int = 0
         self.subscribe_error: Exception | None = None
 
-    async def async_subscribe(
-        self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]
-    ) -> Callable[[], None]:
+    async def async_subscribe(self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]) -> Callable[[], None]:
         self.subscribe_calls.append((topic_pattern, callback))
         if self.subscribe_error is not None:
             err = self.subscribe_error
@@ -205,18 +199,14 @@ def test_resolve_translation_sensors_coretemp_special_cases() -> None:
 
 
 def test_resolve_translation_network_includes_interface() -> None:
-    key, placeholders = resolve_translation(
-        "net", {"host": "h", "interface": "wlan0"}, "bytes_recv"
-    )
+    key, placeholders = resolve_translation("net", {"host": "h", "interface": "wlan0"}, "bytes_recv")
     assert key == "network_field"
     assert placeholders == {"field": "Bytes Received", "interface": "wlan0"}
 
 
 def test_resolve_translation_unknown_measurement_falls_back_to_generic() -> None:
     """Generic is the *only* fallback. There is no silent passthrough."""
-    key, placeholders = resolve_translation(
-        "custom_plugin", {"host": "h"}, "watts"
-    )
+    key, placeholders = resolve_translation("custom_plugin", {"host": "h"}, "watts")
     assert key == TK_GENERIC_FIELD
     assert placeholders == {"field": "Watts"}
 
@@ -234,19 +224,23 @@ def test_format_translation_renders_all_reference_payload_names() -> None:
         ("nvidia_gpu", "gpu_util", "GPU Utilization"),
         ("battery", "percentage", "Battery Percentage"),
     ]
-    for measurement, field, expected in cases:
+    for measurement, field_name, expected in cases:
+        extra_tags: dict[str, str] = {}
+        if measurement == "disk":
+            extra_tags = {"path": "/"}
+        elif measurement == "sensors":
+            extra_tags = {"chip": "coretemp-isa-0000", "feature": "package_id_0"}
+        elif measurement == "net":
+            extra_tags = {"interface": "wlan0"}
         payload = {
             "name": measurement,
-            "tags": {"host": "h"} | ({"path": "/"} if measurement == "disk" else {}) | (
-                {"chip": "coretemp-isa-0000", "feature": "package_id_0"} if measurement == "sensors" else {"interface": "wlan0"} if measurement == "net" else {}),
-            "fields": {field: 1},
+            "tags": {"host": "h"} | extra_tags,
+            "fields": {field_name: 1},
             "timestamp": 0,
         }
         descriptor = parser.parse(json.dumps(payload))[0]
-        rendered = format_translation(
-            descriptor.translation_key, dict(descriptor.translation_placeholders)
-        )
-        assert rendered == expected, (measurement, field, rendered)
+        rendered = format_translation(descriptor.translation_key, dict(descriptor.translation_placeholders))
+        assert rendered == expected, (measurement, field_name, rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -256,16 +250,11 @@ def test_format_translation_renders_all_reference_payload_names() -> None:
 
 def _install_entity_homeassistant_stubs(monkeypatch) -> None:
     """Stub the HA modules so sensor.py / binary_sensor.py import under test."""
-    import sys
-    import types
     import importlib
+    import sys
 
     from homeassistant.helpers import device_registry, dispatcher
     from homeassistant.helpers import entity as entity_helpers
-    from homeassistant.const import UnitOfTemperature
-    from homeassistant.core import HomeAssistant, callback
-    from homeassistant.components import sensor as sensor_module
-    from homeassistant.components import binary_sensor as binary_module
 
     monkeypatch.setattr(device_registry, "DeviceInfo", dict, raising=False)
     monkeypatch.setattr(dispatcher, "async_dispatcher_connect", lambda *a, **kw: lambda: None, raising=False)
@@ -278,13 +267,16 @@ def _install_entity_homeassistant_stubs(monkeypatch) -> None:
 
 
 def _make_descriptor(measurement: str, field: str, *, tags=None, category=None) -> MetricDescriptor:
-    from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
-    from custom_components.telegraf_mqtt.translations_strings import format_translation as _fmt  # noqa: F401
+    from types import MappingProxyType
+
     from custom_components.telegraf_mqtt.naming import (
         resolve_entity_category as _cat,
+    )
+    from custom_components.telegraf_mqtt.naming import (
         resolve_translation as _tr,
     )
-    from types import MappingProxyType
+    from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
+    from custom_components.telegraf_mqtt.translations_strings import format_translation as _fmt  # noqa: F401
 
     translation_key, placeholders = _tr(measurement, tags or {}, field)
     if category is None:
@@ -307,7 +299,6 @@ def _make_descriptor(measurement: str, field: str, *, tags=None, category=None) 
 
 def test_diagnostic_entity_is_disabled_by_default(monkeypatch) -> None:
     """Phase 9: ``disk`` measurement -> diagnostic -> disabled by default."""
-    from homeassistant.components.sensor import SensorEntity
     from custom_components.telegraf_mqtt.sensor import TelegrafMqttSensor
 
     @dataclass
@@ -385,26 +376,45 @@ def test_entity_icon_is_always_set(monkeypatch) -> None:
         ("battery", "percentage", {"host": "host1"}),
     ]
     _install_entity_homeassistant_stubs(monkeypatch)
-    for measurement, field, tags in cases:
+    for measurement, field_name, tags in cases:
         entry = Entry(runtime_data=_runtime_data_with_sw())
         registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
-        descriptor = _make_descriptor(measurement, field, tags=tags)
+        descriptor = _make_descriptor(measurement, field_name, tags=tags)
         registry.update(descriptor)
         entity = TelegrafMqttSensor(entry, f"host1:{descriptor.unique_key}")
-        assert entity._attr_icon, (measurement, field)
-        assert entity._attr_icon.startswith("mdi:"), (measurement, field)
+        assert entity._attr_icon, (measurement, field_name)
+        assert entity._attr_icon.startswith("mdi:"), (measurement, field_name)
 
 
 def test_icon_lookup_table_covers_every_inferred_key() -> None:
     from custom_components.telegraf_mqtt.naming import (
-        ICON_KEY_BATTERY, ICON_KEY_CPU, ICON_KEY_DISK, ICON_KEY_ENERGY, ICON_KEY_FAN,
-        ICON_KEY_GENERIC, ICON_KEY_MEMORY, ICON_KEY_NETWORK, ICON_KEY_PERCENTAGE,
-        ICON_KEY_POWER, ICON_KEY_TEMPERATURE, ICON_KEY_VOLTAGE, ICON_KEY_BINARY,
+        ICON_KEY_BATTERY,
+        ICON_KEY_BINARY,
+        ICON_KEY_CPU,
+        ICON_KEY_DISK,
+        ICON_KEY_ENERGY,
+        ICON_KEY_FAN,
+        ICON_KEY_MEMORY,
+        ICON_KEY_NETWORK,
+        ICON_KEY_PERCENTAGE,
+        ICON_KEY_POWER,
+        ICON_KEY_TEMPERATURE,
+        ICON_KEY_VOLTAGE,
     )
+
     for key in (
-        ICON_KEY_CPU, ICON_KEY_MEMORY, ICON_KEY_DISK, ICON_KEY_NETWORK,
-        ICON_KEY_TEMPERATURE, ICON_KEY_VOLTAGE, ICON_KEY_POWER, ICON_KEY_ENERGY,
-        ICON_KEY_BATTERY, ICON_KEY_FAN, ICON_KEY_PERCENTAGE, ICON_KEY_BINARY,
+        ICON_KEY_CPU,
+        ICON_KEY_MEMORY,
+        ICON_KEY_DISK,
+        ICON_KEY_NETWORK,
+        ICON_KEY_TEMPERATURE,
+        ICON_KEY_VOLTAGE,
+        ICON_KEY_POWER,
+        ICON_KEY_ENERGY,
+        ICON_KEY_BATTERY,
+        ICON_KEY_FAN,
+        ICON_KEY_PERCENTAGE,
+        ICON_KEY_BINARY,
         ICON_KEY_GENERIC,
     ):
         assert key in ICON_FOR_KEY, key
@@ -479,17 +489,25 @@ def test_config_entry_not_ready_uses_mqtt_broker_unreachable_translation(monkeyp
     """When setup fails to subscribe, the raised ConfigEntryNotReady carries
     the mqtt_broker_unreachable translation key + placeholders."""
     import asyncio
+
     from homeassistant.exceptions import ConfigEntryNotReady
+
     fake_mqtt = FakeMqtt()
     fake_mqtt.subscribe_error = RuntimeError("connection refused")
     _patch_integration(monkeypatch, fake_mqtt)
+
     # Replace the real ``ir`` module with a no-op stub so repairs.py
     # doesn't try to access the full Home Assistant runtime.
     class _StubIR:
         class IssueSeverity:
             WARNING = "warning"
-        def async_create_issue(self, *a, **kw): pass
-        def async_delete_issue(self, *a, **kw): pass
+
+        def async_create_issue(self, *a, **kw):
+            pass
+
+        def async_delete_issue(self, *a, **kw):
+            pass
+
     monkeypatch.setattr(integration, "ir", _StubIR(), raising=False)
     hass = FakeHass()
     entry = FakeConfigEntry()
@@ -591,6 +609,7 @@ def test_reconfigure_flow_aborts_on_duplicate_topic(monkeypatch) -> None:
     monkeypatch.setattr(flow, "async_update_reload_and_abort", fake_update)
 
     import asyncio
+
     asyncio.run(flow.async_step_reconfigure({CONF_TOPIC_PATTERN: "new/topic", CONF_DEVICE_NAME: "X"}))
     assert called_with == ["new/topic"]
 
@@ -627,10 +646,12 @@ def test_diagnostics_no_host_identity_leaks(monkeypatch) -> None:
         domain: str = DOMAIN
         title: str = "Telegraf"
         unique_id: str = "telegraf/#"
-        data: dict = field(default_factory=lambda: {
-            CONF_TOPIC_PATTERN: "telegraf/#",
-            CONF_DEVICE_NAME: "Telegraf",
-        })
+        data: dict = field(
+            default_factory=lambda: {
+                CONF_TOPIC_PATTERN: "telegraf/#",
+                CONF_DEVICE_NAME: "Telegraf",
+            }
+        )
         options: dict = field(default_factory=dict)
         runtime_data: Any = None
 
@@ -728,11 +749,25 @@ def test_overlap_repair_raises_and_auto_resolves(monkeypatch) -> None:
         class IssueSeverity:
             WARNING = "warning"
 
-        def async_create_issue(self, hass, *, domain, issue_id, is_fixable, severity, translation_key, translation_placeholders):
-            created.append({
-                "issue_id": issue_id, "translation_key": translation_key,
-                "severity": severity, "placeholders": translation_placeholders,
-            })
+        def async_create_issue(
+            self,
+            hass,
+            *,
+            domain,
+            issue_id,
+            is_fixable,
+            severity,
+            translation_key,
+            translation_placeholders,
+        ):
+            created.append(
+                {
+                    "issue_id": issue_id,
+                    "translation_key": translation_key,
+                    "severity": severity,
+                    "placeholders": translation_placeholders,
+                }
+            )
 
         def async_delete_issue(self, hass, *, domain, issue_id):
             deleted.append(issue_id)
@@ -785,8 +820,25 @@ def test_invalid_option_repair_raises_and_clears(monkeypatch) -> None:
         class IssueSeverity:
             WARNING = "warning"
 
-        def async_create_issue(self, hass, *, domain, issue_id, is_fixable, severity, translation_key, translation_placeholders):
-            created.append({"issue_id": issue_id, "translation_key": translation_key, "severity": severity, "placeholders": translation_placeholders})
+        def async_create_issue(
+            self,
+            hass,
+            *,
+            domain,
+            issue_id,
+            is_fixable,
+            severity,
+            translation_key,
+            translation_placeholders,
+        ):
+            created.append(
+                {
+                    "issue_id": issue_id,
+                    "translation_key": translation_key,
+                    "severity": severity,
+                    "placeholders": translation_placeholders,
+                }
+            )
 
         def async_delete_issue(self, hass, *, domain, issue_id):
             deleted.append(issue_id)
@@ -844,10 +896,10 @@ def test_stale_device_pruned_after_delete_delay() -> None:
     becomes eligible for ``prune_empty_devices`` once ``delete_delay``
     has elapsed since the last heartbeat.
     """
+    from types import MappingProxyType
+
     from custom_components.telegraf_mqtt.models import MetricDescriptor
     from custom_components.telegraf_mqtt.naming import resolve_translation
-    from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
-    from types import MappingProxyType
 
     clock = [0.0]
     manager = DeviceManager(clock=lambda: clock[0], delete_delay=10, cleanup_delay=0)
@@ -889,9 +941,10 @@ def test_stale_device_pruned_after_delete_delay() -> None:
 
 def test_stale_device_recovers_on_reappearance() -> None:
     """A pruned device reappears when its host sends another message."""
+    from types import MappingProxyType
+
     from custom_components.telegraf_mqtt.models import MetricDescriptor
     from custom_components.telegraf_mqtt.naming import resolve_translation
-    from types import MappingProxyType
 
     clock = [0.0]
     manager = DeviceManager(clock=lambda: clock[0], delete_delay=10, cleanup_delay=0)
@@ -939,6 +992,7 @@ def test_stale_device_recovers_on_reappearance() -> None:
 
 def test_every_descriptor_translation_key_has_strings_json_entry() -> None:
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     strings = json.loads((root / "custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
     sensor_keys = set(strings["entity"]["sensor"].keys())
@@ -950,6 +1004,7 @@ def test_every_descriptor_translation_key_has_strings_json_entry() -> None:
 
 def test_every_descriptor_translation_key_has_en_json_entry() -> None:
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     en = json.loads((root / "custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8"))
     sensor_keys = set(en["entity"]["sensor"].keys())
@@ -961,6 +1016,7 @@ def test_every_descriptor_translation_key_has_en_json_entry() -> None:
 
 def test_sw_version_field_is_in_strings_and_en() -> None:
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     strings = json.loads((root / "custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
     en = json.loads((root / "custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8"))
@@ -970,6 +1026,7 @@ def test_sw_version_field_is_in_strings_and_en() -> None:
 
 def test_reconfigure_step_is_in_strings_and_en() -> None:
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     strings = json.loads((root / "custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
     en = json.loads((root / "custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8"))
@@ -981,6 +1038,7 @@ def test_reconfigure_step_is_in_strings_and_en() -> None:
 
 def test_exceptions_block_is_in_strings_and_en() -> None:
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     strings = json.loads((root / "custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
     en = json.loads((root / "custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8"))
@@ -1001,7 +1059,12 @@ def test_diagnostic_descriptors_carry_entity_category() -> None:
     parser = TelegrafParser()
     for payload in (
         {"name": "disk", "tags": {"host": "h", "path": "/"}, "fields": {"used_percent": 50}, "timestamp": 0},
-        {"name": "system", "tags": {"host": "h"}, "fields": {"uptime": 1, "load1": 0.5, "processes_forked": 5}, "timestamp": 0},
+        {
+            "name": "system",
+            "tags": {"host": "h"},
+            "fields": {"uptime": 1, "load1": 0.5, "processes_forked": 5},
+            "timestamp": 0,
+        },
     ):
         for descriptor in parser.parse(json.dumps(payload)):
             if descriptor.field in ("used_percent", "uptime", "load1", "processes_forked"):
@@ -1027,6 +1090,7 @@ def test_temperature_field_gets_temperature_device_class() -> None:
 
 def _readme_text() -> str:
     from pathlib import Path
+
     return (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
 
 
@@ -1084,11 +1148,11 @@ def test_generic_field_is_the_only_fallback() -> None:
     invisible."""
     from custom_components.telegraf_mqtt.naming import TK_GENERIC_FIELD
 
-    for measurement, field in (
+    for measurement, field_name in (
         ("some_custom_plugin", "watts"),
         ("weird", "deep_value"),
         ("memory_extra", "count"),
     ):
-        key, placeholders = resolve_translation(measurement, {"host": "h"}, field)
+        key, placeholders = resolve_translation(measurement, {"host": "h"}, field_name)
         assert key == TK_GENERIC_FIELD
-        assert placeholders == {"field": field.replace("_", " ").title()}
+        assert placeholders == {"field": field_name.replace("_", " ").title()}

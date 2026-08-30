@@ -105,13 +105,22 @@ _HA_MODULE_NAMES: tuple[str, ...] = (
     "homeassistant.helpers.device_registry",
     "homeassistant.helpers.dispatcher",
     "homeassistant.helpers.entity",
+    "homeassistant.helpers.entity_platform",
 )
 
 _SAVED_HA_MODULES: dict[str, types.ModuleType | None] = {}
 
 
 def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
-    """Fresh stand-ins covering everything sensor.py / binary_sensor.py import."""
+    """Fresh stand-ins covering everything sensor.py / binary_sensor.py import.
+
+    Kept in lockstep with the platforms' import surface: every
+    ``homeassistant.*`` name either platform module binds must resolve to
+    a fake here. A missing name makes the real HA package import
+    mid-dance, which poisons ``sys.modules`` for the harness-based tests
+    that follow (and, under a shuffled test order, breaks their ``hass``
+    fixture with confusing missing-attribute errors).
+    """
     components = types.ModuleType("homeassistant.components")
     sensor_mod = types.ModuleType("homeassistant.components.sensor")
     binary_mod = types.ModuleType("homeassistant.components.binary_sensor")
@@ -120,6 +129,7 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
     core = types.ModuleType("homeassistant.core")
     device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
     helpers = types.ModuleType("homeassistant.helpers")
 
     class StubEntity:
@@ -135,6 +145,20 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
     class UnitOfTemperature:
         CELSIUS = "°C"
 
+    class StubEntityCategory(enum.StrEnum):
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    class SensorDeviceClass(enum.StrEnum):
+        TEMPERATURE = "temperature"
+        POWER = "power"
+        ENERGY = "energy"
+
+    class SensorStateClass(enum.StrEnum):
+        MEASUREMENT = "measurement"
+        TOTAL = "total"
+        TOTAL_INCREASING = "total_increasing"
+
     def callback(func):
         func.__hass_callback__ = True
         return func
@@ -142,21 +166,24 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
     def async_dispatcher_connect(_hass, _signal, target):
         return lambda: None
 
+    def add_entities(entities) -> None:
+        for entity in entities:
+            entity.write_count = 0
+
     sensor_mod.SensorEntity = StubEntity
+    sensor_mod.SensorDeviceClass = SensorDeviceClass
+    sensor_mod.SensorStateClass = SensorStateClass
     binary_mod.BinarySensorEntity = StubEntity
     config_entries.ConfigEntry = object
     const.UnitOfTemperature = UnitOfTemperature
+    const.EntityCategory = StubEntityCategory
     core.HomeAssistant = object
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    entity_platform.AddEntitiesCallback = add_entities
 
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")
-
-    class StubEntityCategory(str, enum.Enum):
-        CONFIG = "config"
-        DIAGNOSTIC = "diagnostic"
-
     entity_helpers.EntityCategory = StubEntityCategory
 
     return {
@@ -170,6 +197,7 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
         "homeassistant.helpers.device_registry": device_registry,
         "homeassistant.helpers.dispatcher": dispatcher,
         "homeassistant.helpers.entity": entity_helpers,
+        "homeassistant.helpers.entity_platform": entity_platform,
     }
 
 

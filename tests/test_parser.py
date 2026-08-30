@@ -9,40 +9,40 @@ from custom_components.telegraf_mqtt.parsers.generic import build_unique_key
 from custom_components.telegraf_mqtt.translations_strings import format_translation
 
 REFERENCE_PAYLOADS = [
-    {"name": "cpu", "tags": {"host": "cachyos-gekko"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
+    {"name": "cpu", "tags": {"host": "host-a"}, "fields": {"usage_idle": 88.4}, "timestamp": 1721664000},
     {
         "name": "mem",
-        "tags": {"host": "cachyos-gekko"},
+        "tags": {"host": "host-a"},
         "fields": {"used_percent": 41.2, "used": 8589934592},
         "timestamp": 1721664000,
     },
     {
         "name": "disk",
-        "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+        "tags": {"host": "host-a", "path": "/", "fstype": "ext4"},
         "fields": {"used_percent": 63.5, "free": 128849018880},
         "timestamp": 1721664000,
     },
     {
         "name": "net",
-        "tags": {"host": "cachyos-gekko", "interface": "wlan0"},
+        "tags": {"host": "host-a", "interface": "wlan0"},
         "fields": {"bytes_recv": 1048576000, "bytes_sent": 209715200},
         "timestamp": 1721664000,
     },
     {
         "name": "sensors",
-        "tags": {"host": "cachyos-gekko", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
+        "tags": {"host": "host-a", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
         "fields": {"temp_input": 52.0},
         "timestamp": 1721664000,
     },
     {
         "name": "nvidia_gpu",
-        "tags": {"host": "cachyos-gekko"},
+        "tags": {"host": "host-a"},
         "fields": {"gpu_util": 12, "temp": 45.0, "mem_used": 1024},
         "timestamp": 1721664000,
     },
     {
         "name": "battery",
-        "tags": {"host": "cachyos-gekko", "state": "discharging"},
+        "tags": {"host": "host-a", "state": "discharging"},
         "fields": {"percentage": 87.0, "voltage": 11.4},
         "timestamp": 1721664000,
     },
@@ -84,7 +84,7 @@ def test_descriptor_generation_sets_units_state_classes_and_immutable_tags() -> 
         json.dumps(
             {
                 "name": "net",
-                "tags": {"host": "cachyos-gekko", "interface": "wlan0"},
+                "tags": {"host": "host-a", "interface": "wlan0"},
                 "fields": {"bytes_recv": 1048576000, "link_up": True, "label": "wifi"},
                 "timestamp": 1721664000,
             }
@@ -106,7 +106,7 @@ def test_measurement_specific_naming_and_profile_categories() -> None:
         json.dumps(
             {
                 "name": "sensors",
-                "tags": {"host": "cachyos-gekko", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
+                "tags": {"host": "host-a", "chip": "coretemp-isa-0000", "feature": "package_id_0"},
                 "fields": {"temp_input": 52.0},
                 "timestamp": 1721664000,
             }
@@ -116,14 +116,16 @@ def test_measurement_specific_naming_and_profile_categories() -> None:
         json.dumps(
             {
                 "name": "disk",
-                "tags": {"host": "cachyos-gekko", "path": "/", "fstype": "ext4"},
+                "tags": {"host": "host-a", "path": "/", "fstype": "ext4"},
                 "fields": {"used_percent": 63.5},
                 "timestamp": 1721664000,
             }
         )
     )
 
-    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in sensors_descriptors] == ["CPU Package Temperature"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in sensors_descriptors] == [
+        "CPU Package Temperature"
+    ]
     assert sensors_descriptors[0].entity_category is None
     assert disk_descriptors[0].entity_category == "diagnostic"
 
@@ -135,7 +137,7 @@ def test_name_resolution_excludes_host_leakage_and_resolves_field_aliases() -> N
         json.dumps(
             {
                 "name": "cpu",
-                "tags": {"host": "cachyos-gekko"},
+                "tags": {"host": "host-a"},
                 "fields": {"usage_idle": 88.4},
                 "timestamp": 1721664000,
             }
@@ -145,15 +147,20 @@ def test_name_resolution_excludes_host_leakage_and_resolves_field_aliases() -> N
         json.dumps(
             {
                 "name": "mem",
-                "tags": {"host": "cachyos-gekko"},
+                "tags": {"host": "host-a"},
                 "fields": {"used_percent": 41.2, "used": 8589934592},
                 "timestamp": 1721664000,
             }
         )
     )
 
-    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == ["CPU Usage Idle"]
-    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in mem_descriptors] == ["Memory Used Percent", "Memory Used"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == [
+        "CPU Usage Idle"
+    ]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in mem_descriptors] == [
+        "Memory Used Percent",
+        "Memory Used",
+    ]
 
 
 def test_name_resolution_normalizes_tag_value_whitespace_and_case_for_alias_lookup() -> None:
@@ -163,14 +170,16 @@ def test_name_resolution_normalizes_tag_value_whitespace_and_case_for_alias_look
         json.dumps(
             {
                 "name": "cpu",
-                "tags": {"host": "cachyos-gekko", "cpu": " CPU-total "},
+                "tags": {"host": "host-a", "cpu": " CPU-total "},
                 "fields": {"usage_idle": 88.4},
                 "timestamp": 1721664000,
             }
         )
     )
 
-    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == ["CPU Usage Idle"]
+    assert [format_translation(d.translation_key, dict(d.translation_placeholders)) for d in cpu_descriptors] == [
+        "CPU Usage Idle"
+    ]
 
 
 def test_parser_drops_invalid_json_and_unsupported_field_shapes() -> None:
@@ -181,7 +190,7 @@ def test_parser_drops_invalid_json_and_unsupported_field_shapes() -> None:
         json.dumps(
             {
                 "name": "custom",
-                "tags": {"host": "cachyos-gekko"},
+                "tags": {"host": "host-a"},
                 "fields": {"ok": 1, "nested": {"bad": True}, "items": [1, 2]},
                 "timestamp": 1721664000,
             }

@@ -46,6 +46,7 @@ class ParserStats:
     parsed: int = 0
     dropped_invalid_json: int = 0
     dropped_unsupported_shape: int = 0
+    dropped_parser_error: int = 0
     unknown_measurement_fallbacks: int = 0
     last_message: dict[str, Any] | None = None
 
@@ -69,6 +70,25 @@ class ParserStats:
             "byte_length": byte_length,
             "dropped_reason": reason,
             "measurement": None,
+        }
+
+    def note_parser_error(self, topic: str, byte_length: int, measurement: str) -> None:
+        """Record a handler-raised fault.
+
+        ``handler(decoded)`` is wrapped in a narrow ``try/except`` so a
+        single bad assumption inside a future per-measurement handler
+        (``KeyError``, ``TypeError``, ``AttributeError``, ``ValueError``)
+        cannot take down the MQTT subscription. This counter gives the
+        user a way to see *that* it happened, and ``last_message`` keeps
+        the topic/byte_length/measurement for diagnostics download.
+        """
+        self.received += 1
+        self.dropped_parser_error += 1
+        self.last_message = {
+            "topic": topic,
+            "byte_length": byte_length,
+            "dropped_reason": "parser_error",
+            "measurement": measurement,
         }
 
     def note_parsed(
@@ -129,7 +149,7 @@ class TelegrafParser:
 
         try:
             decoded = json.loads(payload)
-        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        except TypeError, UnicodeDecodeError, json.JSONDecodeError:
             _LOGGER.debug("Invalid Telegraf JSON payload")
             self.stats.note_dropped(topic, byte_length, "invalid_json")
             return []
@@ -153,6 +173,29 @@ class TelegrafParser:
             _LOGGER.debug("Unknown Telegraf measurement %r; using generic parser", measurement)
             handler = parse_generic_payload
             fell_back = True
-        descriptors = list(handler(decoded))
+        try:
+            descriptors = list(handler(decoded))
+        except (KeyError, TypeError, AttributeError, ValueError) as handler_err:
+            # Fault isolation around the per-measurement handler. The
+            # JSON envelope has been validated and the measurement name
+            # is a string, so any of these four exceptions means a bad
+            # assumption inside the handler (e.g. ``fields["x"]`` on a
+            # missing key, a nested-dict coerced to ``float``, a
+            # ``Measurement.tags`` typo). We log at DEBUG, bump the
+            # ``dropped_parser_error`` counter, and return ``[]`` so
+            # the MQTT subscription keeps processing the next message.
+            #
+            # Exceptions outside this list (KeyboardInterrupt,
+            # SystemExit, MemoryError, asyncio.CancelledError, ...)
+            # propagate as designed -- the narrow catch is a guard rail
+            # for *handler* bugs, not a blanket suppression.
+            _LOGGER.debug(
+                "Telegraf handler %r raised on topic %s: %s",
+                measurement,
+                topic,
+                handler_err,
+            )
+            self.stats.note_parser_error(topic, byte_length, measurement)
+            return []
         self.stats.note_parsed(topic, byte_length, measurement, fell_back=fell_back)
         return descriptors

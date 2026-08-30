@@ -57,6 +57,18 @@ def _invalid_option_issue_id(entry_id: str) -> str:
     return f"invalid_persisted_option_{entry_id}"
 
 
+def _no_traffic_issue_id(entry_id: str) -> str:
+    return f"no_traffic_on_topic_{entry_id}"
+
+
+def _device_id_collision_issue_id(entry_id: str) -> str:
+    return f"device_id_collision_{entry_id}"
+
+
+def _device_id_conflict_issue_id(entry_id: str) -> str:
+    return f"device_id_conflict_{entry_id}"
+
+
 # Conservative MQTT topic overlap check. Two patterns overlap when
 # one is a strict prefix of the other up to a ``/`` boundary AND the
 # shorter pattern ends in ``#`` or a literal segment. Identical
@@ -118,7 +130,7 @@ def _patterns_overlap(a: str, b: str) -> bool:
         return True
     # Walk the segments, allowing ``#`` to terminate one of the
     # patterns early as long as the other has more segments.
-    for i, (seg_a, seg_b) in enumerate(zip(a_parts, b_parts)):
+    for i, (seg_a, seg_b) in enumerate(zip(a_parts, b_parts, strict=False)):
         if seg_a == "#":
             # a# matches the rest of b only if b has anything beyond.
             return i < len(b_parts) - 1 or b_parts[i:] != [seg_a]
@@ -128,11 +140,9 @@ def _patterns_overlap(a: str, b: str) -> bool:
             continue
         if seg_a != seg_b:
             return False
-    # Same length, every segment compatible.
-    if len(a_parts) == len(b_parts):
-        return True
-    # Different lengths and no ``#`` encountered -- disjoint.
-    return False
+    # Same length -> every segment compatible. Different lengths with
+    # no ``#`` encountered -> disjoint.
+    return len(a_parts) == len(b_parts)
 
 
 def check_overlapping_topics(hass: Any, entry: Any) -> list[str]:
@@ -154,11 +164,7 @@ def check_overlapping_topics(hass: Any, entry: Any) -> list[str]:
     for other in others:
         if other.entry_id == entry.entry_id:
             continue
-        other_pattern = (
-            other.data.get(CONF_TOPIC_PATTERN)
-            if hasattr(other, "data") and other.data
-            else None
-        )
+        other_pattern = other.data.get(CONF_TOPIC_PATTERN) if hasattr(other, "data") and other.data else None
         if not other_pattern:
             continue
         if not _patterns_overlap(own, other_pattern):
@@ -191,9 +197,7 @@ def check_overlapping_topics(hass: Any, entry: Any) -> list[str]:
     return overlapping
 
 
-def check_invalid_persisted_option(
-    hass: Any, entry: Any, invalid_keys: Iterable[str]
-) -> None:
+def check_invalid_persisted_option(hass: Any, entry: Any, invalid_keys: Iterable[str]) -> None:
     """Raise (or auto-resolve) a Repairs issue for invalid options.
 
     Called from ``_options_from_entry_with_repair``. If
@@ -223,6 +227,152 @@ def check_invalid_persisted_option(
         severity=ir.IssueSeverity.WARNING,
         translation_key="invalid_persisted_option",
         translation_placeholders=placeholders,
+    )
+
+
+def check_no_traffic(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for "no traffic on topic".
+
+    Called from the periodic ``check_expiry`` callback scheduled by
+    ``integration._schedule_expiry_check`` so the snoop listener has
+    time to receive messages before we flag the topic as silent. If
+    ``runtime_data.manager.has_received_messages()`` is False, the
+    user's configured topic pattern has matched nothing and the issue
+    is raised. The issue is auto-resolved the moment any message
+    arrives, on the next ``check_no_traffic`` tick.
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    manager = getattr(runtime_data, "manager", None)
+    if manager is None:
+        return
+    if manager.has_received_messages():
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_no_traffic_issue_id(entry.entry_id),
+        )
+        return
+    # Compose a short, scannable description of the empty state.
+    seen_topics_preview = ", ".join(sorted(manager.seen_topics)[:5])
+    if not seen_topics_preview:
+        seen_topics_preview = "(none)"
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=_no_traffic_issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="no_traffic_on_topic",
+        translation_placeholders={
+            "configured_topic": entry.data.get(CONF_TOPIC_PATTERN, ""),
+            "seen_topics": seen_topics_preview,
+        },
+    )
+
+
+def check_device_id_collision(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for device-id collisions.
+
+    A "collision" is two distinct ``host`` tags producing the same
+    device_id slug (e.g. ``My Server`` and ``my_server`` after
+    slug normalization). The integration merges them silently, which
+    is correct behaviour but confusing for the user -- this Repairs
+    issue tells them which hosts are colliding and what to do about
+    it (set a unique ``agent_hostname`` per Telegraf instance).
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    manager = getattr(runtime_data, "manager", None)
+    if manager is None:
+        return
+    collisions = manager.find_device_id_collisions()
+    if not collisions:
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_device_id_collision_issue_id(entry.entry_id),
+        )
+        return
+    # Build a scannable description of the collisions: one line per
+    # device_id slug with the host tags that produced it.
+    parts = [f"{device_id} \u2190 {', '.join(sorted(hosts))}" for device_id, hosts in sorted(collisions.items())]
+    description = "; ".join(parts)
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=_device_id_collision_issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="device_id_collision",
+        translation_placeholders={"description": description},
+    )
+
+
+def check_device_id_conflict(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for cross-entry device-id conflicts.
+
+    A "conflict" is the same device_id slug produced by two different
+    config entries (typically with different topic patterns). The
+    integration will create the device twice but HA's device registry
+    will merge them on first write, which is the wrong outcome. This
+    Repairs issue lists the conflicting entries so the user can
+    adjust one of the topic patterns.
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    manager = getattr(runtime_data, "manager", None)
+    if manager is None:
+        return
+    own_device_ids = set(manager.devices)
+    if not own_device_ids:
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_device_id_conflict_issue_id(entry.entry_id),
+        )
+        return
+    conflicting_entries: list[str] = []
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if other.entry_id == entry.entry_id:
+            continue
+        other_data = getattr(other, "data", None) or {}
+        other_pattern = other_data.get(CONF_TOPIC_PATTERN)
+        other_manager = getattr(getattr(other, "runtime_data", None), "manager", None)
+        if other_manager is None or not other_pattern:
+            continue
+        overlap = own_device_ids & set(other_manager.devices)
+        if overlap:
+            conflicting_entries.append(f"{other.title or other.entry_id} ({other_pattern})")
+    if not conflicting_entries:
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_device_id_conflict_issue_id(entry.entry_id),
+        )
+        return
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=_device_id_conflict_issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="device_id_conflict",
+        translation_placeholders={
+            "conflicts": "; ".join(conflicting_entries),
+        },
     )
 
 
