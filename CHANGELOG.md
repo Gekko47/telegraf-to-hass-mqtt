@@ -21,7 +21,12 @@ Phase 10 — 🏆 Platinum quality-scale gate & HACS-release polish.
   accepts `"auto" | "sensor" | "binary_sensor" | "none"` so a field can be
   routed to either platform, or skipped entirely, at the field level.
 - **Configurable `device_id_strategy`**: `host` (default), `host_topic`, or
-  `topic_only`, surfaced in the options flow.
+  `topic_only`, surfaced in the options flow. Changing the strategy in
+  OptionsFlow reloads the config entry (it cannot be applied live because
+  the existing `DeviceManager.devices` dict is keyed by the old strategy's
+  slugs and a live apply would leave them orphaned while new traffic
+  creates a parallel set of registries). All other options still apply
+  live without a reload.
 - **Five Repairs issues** wired into `async_setup_entry` and the periodic
   expiry tick: `no_traffic_on_topic`, `device_id_collision` (two host
   tags slug-collide), `device_id_conflict` (two config entries

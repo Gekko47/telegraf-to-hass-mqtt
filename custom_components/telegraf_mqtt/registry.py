@@ -688,6 +688,20 @@ class DeviceManager:
             self._seen_topics.add(topic)
 
     @property
+    def device_id_strategy(self) -> str:
+        """Return the active ``device_id_strategy``.
+
+        Public read-only accessor so the live options listener in
+        ``async_setup_entry`` can compare the current value against the
+        user's new pick without reaching into the private attribute.
+        The strategy feeds ``_derive_device_id`` at the manager level,
+        so a change invalidates every existing ``self.devices`` key --
+        a live apply cannot fix the old registries, only a config-entry
+        reload can. See ``_async_options_maybe_reload``.
+        """
+        return self._device_id_strategy
+
+    @property
     def seen_hosts(self) -> frozenset[str]:
         """Return the immutable snapshot of hosts seen since setup."""
         return frozenset(self._seen_hosts)

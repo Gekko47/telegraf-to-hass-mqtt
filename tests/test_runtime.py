@@ -49,14 +49,21 @@ class FakeConfigEntry:
         self.options = options or {}
         self.runtime_data = None
         self._unload_callbacks: list[Callable[[], None]] = []
-        self.update_listener: Callable[[FakeHass, FakeConfigEntry], Any] | None = None
+        # Real HA records every listener and fires them all; this fake
+        # previously kept only the last one, which broke when Phase 10
+        # registered a second listener (``_async_options_maybe_reload``).
+        self._update_listeners: list[Callable[[FakeHass, FakeConfigEntry], Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
 
     def add_update_listener(self, listener: Callable[[FakeHass, FakeConfigEntry], Any]) -> Callable[[], None]:
-        self.update_listener = listener
+        self._update_listeners.append(listener)
         return lambda: None
+
+    async def _fire_update_listeners(self, hass: FakeHass) -> None:
+        for listener in self._update_listeners:
+            await listener(hass, self)
 
 
 class FakeMqtt:
@@ -150,7 +157,7 @@ def test_setup_applies_options_and_schedules_expiry(monkeypatch) -> None:
     registry = entry.runtime_data.manager.get_or_create_registry("host1", "host1")
     assert registry.update(_descriptor()) is False
     assert entry.runtime_data.cancel_expiry is not None
-    assert entry.update_listener is not None
+    assert entry._update_listeners
 
 
 def test_expiry_dispatches_metric_update(monkeypatch) -> None:
@@ -183,7 +190,7 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
         CONF_FIELD_OVERRIDES: {"used_percent": {"native_unit": "%"}},
         CONF_EXPIRE_AFTER: 5,
     }
-    asyncio.run(entry.update_listener(hass, entry))
+    asyncio.run(entry._fire_update_listeners(hass))
 
     state = registry.get("mem_used_percent")
     assert state.is_available is False
@@ -219,7 +226,7 @@ def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     # Live update via the entry's update listener -- the same path
     # ``add_update_listener`` fires when the user changes OptionsFlow values.
     entry.options = {CONF_CLEANUP_DELAY: 5, CONF_DELETE_DELAY: 9}
-    asyncio.run(entry.update_listener(hass, entry))
+    asyncio.run(entry._fire_update_listeners(hass))
 
     # Manager-level values replaced.
     assert entry.runtime_data.manager._cleanup_delay == 5
@@ -253,7 +260,7 @@ def test_live_update_recovers_invalid_persisted_values_without_reload(
     # update listener then re-normalizes with defaults instead of
     # crashing on int('abc') / int(None).
     entry.options = {CONF_EXPIRE_AFTER: "abc", CONF_CLEANUP_DELAY: None}
-    asyncio.run(entry.update_listener(hass, entry))
+    asyncio.run(entry._fire_update_listeners(hass))
 
     assert entry.runtime_data.manager._expire_after == DEFAULT_EXPIRE_AFTER
     assert entry.runtime_data.manager._cleanup_delay == DEFAULT_CLEANUP_DELAY

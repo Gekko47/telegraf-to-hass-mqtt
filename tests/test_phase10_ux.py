@@ -543,6 +543,116 @@ def test_device_id_strategy_host_topic_prefers_host_tag() -> None:
 
 
 # ---------------------------------------------------------------------------
+# device_id_strategy reload listener
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ListenerHass:
+    """Minimal hass double: records ``async_reload`` calls."""
+
+    config_entries: Any = None
+
+    def __post_init__(self) -> None:
+        if self.config_entries is None:
+            self.config_entries = _ListenerConfigEntries()
+
+
+@dataclass
+class _ListenerConfigEntries:
+    reload_calls: list[str] = field(default_factory=list)
+
+    async def async_reload(self, entry_id: str) -> None:
+        self.reload_calls.append(entry_id)
+
+
+@dataclass
+class _ListenerEntry:
+    """Minimal entry double exposing only what the reload listener reads."""
+
+    entry_id: str = "entry-1"
+    options: dict = field(default_factory=dict)
+    runtime_data: Any = None
+
+
+def test_device_id_strategy_change_triggers_config_entry_reload() -> None:
+    """The ``_async_options_maybe_reload`` listener fires a config-entry
+    reload when the user picks a new strategy, because the existing
+    ``DeviceManager.devices`` dict is keyed by the old strategy's slugs
+    and a live apply would leave them orphaned while new traffic
+    creates a parallel set of registries.
+
+    Same-strategy updates must NOT trigger a reload.
+    """
+    from custom_components.telegraf_mqtt.registry import DeviceManager
+
+    # Build a manager as the live update listener would, then assert the
+    # public read-only accessor matches the private slot.
+    manager = DeviceManager(device_id_strategy="host")
+    assert manager.device_id_strategy == "host"
+
+    hass = _ListenerHass()
+    entry = _ListenerEntry(
+        options={},
+        runtime_data=integration.TelegrafMqttRuntimeData(
+            manager=manager,
+            parser=None,
+            parser_stats=None,
+            manufacturer=None,
+            model=None,
+        ),
+    )
+
+    async def _run() -> None:
+        # No-op: same strategy the manager already has.
+        await integration._async_options_maybe_reload(hass, entry)
+        assert hass.config_entries.reload_calls == []
+
+        # Strategy changed: must trigger exactly one reload.
+        entry.options = {"device_id_strategy": "topic_only"}
+        await integration._async_options_maybe_reload(hass, entry)
+        assert hass.config_entries.reload_calls == [entry.entry_id]
+
+    asyncio.run(_run())
+
+
+def test_device_id_strategy_reload_listener_is_a_noop_when_runtime_missing() -> None:
+    """Defensive guard: a config entry without ``runtime_data`` (e.g.
+    mid-unload) must not raise, and must not fire a reload."""
+    hass = _ListenerHass()
+    entry = _ListenerEntry(options={"device_id_strategy": "topic_only"}, runtime_data=None)
+
+    async def _run() -> None:
+        await integration._async_options_maybe_reload(hass, entry)
+
+    asyncio.run(_run())
+    assert hass.config_entries.reload_calls == []
+
+
+def test_device_id_strategy_reload_listener_is_a_noop_when_manager_missing() -> None:
+    """``runtime_data.manager`` is typed ``DeviceManager | None`` for
+    the unload path; the listener must tolerate ``None`` and skip the
+    reload without raising."""
+    entry = _ListenerEntry(
+        options={"device_id_strategy": "topic_only"},
+        runtime_data=integration.TelegrafMqttRuntimeData(
+            manager=None,
+            parser=None,
+            parser_stats=None,
+            manufacturer=None,
+            model=None,
+        ),
+    )
+    hass = _ListenerHass()
+
+    async def _run() -> None:
+        await integration._async_options_maybe_reload(hass, entry)
+
+    asyncio.run(_run())
+    assert hass.config_entries.reload_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Manager apply_options propagation
 # ---------------------------------------------------------------------------
 

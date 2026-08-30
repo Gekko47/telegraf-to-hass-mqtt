@@ -224,6 +224,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if hasattr(entry, "async_on_unload") and hasattr(entry, "add_update_listener"):
         entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+        # ``device_id_strategy`` is the one option that cannot be applied
+        # live -- see ``_async_options_maybe_reload`` for the reason. Both
+        # listeners fire on every options change; the live path runs
+        # first, then the reload path triggers when the strategy differs.
+        entry.async_on_unload(entry.add_update_listener(_async_options_maybe_reload))
 
     # Phase 7: Repairs for recoverable config problems. The overlap
     # check is idempotent -- if this entry's pattern is fine and no
@@ -304,6 +309,30 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
     )
     _schedule_expiry_check(hass, entry)
+
+
+async def _async_options_maybe_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the entry when ``device_id_strategy`` changed.
+
+    ``device_id_strategy`` feeds ``DeviceManager._derive_device_id`` at
+    the manager level, so a change invalidates every existing entry in
+    ``self.devices`` (keyed by the old strategy's slugs). A live
+    ``apply_options`` cannot fix the existing registries: rebuilding
+    them would also change every entity's ``unique_id``, which is
+    documented as MAJOR-breaking. Reloading the entry is the only
+    way to keep the entity-registry consistent.
+
+    All other option changes still take the live path through
+    ``_async_options_updated``; this listener only fires the reload
+    when the strategy itself changed.
+    """
+    runtime = entry.runtime_data
+    if runtime is None or runtime.manager is None:
+        return
+    new_options = _options_from_entry(entry)
+    if runtime.manager.device_id_strategy == new_options.device_id_strategy:
+        return
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _coerce_int_option(
