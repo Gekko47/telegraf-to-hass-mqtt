@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
-from .const import DEFAULT_AUTO_DISCOVER_PROBE_TOPIC, DEFAULT_AUTO_DISCOVER_TIMEOUT
+from .const import DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +32,23 @@ _LOGGER = logging.getLogger(__name__)
 # and the dispatcher is responsible for reading ``.topic`` and
 # ``.payload`` off it.
 SnoopDispatcher = Callable[[str, Any], None]
+
+
+def derive_probe_topic(topic_pattern: str) -> str:
+    """Return a probe topic that never widens past ``topic_pattern``.
+
+    The post-setup snoop must never silently widen past the user's
+    configured subscription, so this function is a no-op on the
+    pattern itself: whatever the user configured is what the snoop
+    subscribes to. The single thing it does is fall back to the
+    documented default ``telegraf/#`` when the input is empty or
+    whitespace -- a corrupted entry shouldn't get a probe that
+    subscribes to literally everything on the broker.
+    """
+    cleaned = (topic_pattern or "").strip()
+    if not cleaned:
+        return DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
+    return cleaned
 
 
 @dataclass
@@ -59,18 +76,17 @@ class SnoopListener:
     """An MQTT subscription that records -- and optionally dispatches --
     what the broker carries.
 
-    ``timeout_seconds=0.0`` makes the listener long-lived; the caller is
-    responsible for invoking ``stop()`` (the integration stores the
+    ``timeout_seconds=0.0`` makes the listener long-lived; the caller
+    is responsible for invoking ``stop()`` (the integration stores the
     unsubscribe handle on the runtime data and tears it down at entry
-    unload). The 10-second default is preserved for the diagnostics
-    probe path which only needs a one-shot snapshot.
+    unload). Any positive value schedules an auto-stop timer.
     """
 
     def __init__(
         self,
         *,
-        probe_topic: str = DEFAULT_AUTO_DISCOVER_PROBE_TOPIC,
-        timeout_seconds: float = float(DEFAULT_AUTO_DISCOVER_TIMEOUT),
+        probe_topic: str,
+        timeout_seconds: float,
         clock: Callable[[], float] | None = None,
         dispatcher: SnoopDispatcher | None = None,
     ) -> None:

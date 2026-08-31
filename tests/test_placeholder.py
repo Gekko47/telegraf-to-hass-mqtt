@@ -236,7 +236,10 @@ def test_manifest_and_translations_are_release_ready() -> None:
     assert manifest["documentation"].endswith("telegraf-to-hass-mqtt")
     assert manifest["issue_tracker"].endswith("issues")
     assert "homeassistant" not in manifest
-    assert strings["config"]["step"]["user"]["data"]["topic_pattern"] == "MQTT topic pattern"
+    # The device-metadata fields moved to ``manual_topic`` when the two-path
+    # config flow landed; ``user`` is now the mode picker. Both are pinned.
+    assert strings["config"]["step"]["manual_topic"]["data"]["topic_pattern"] == "MQTT topic pattern"
+    assert strings["config"]["step"]["user"]["data"]["setup_mode"] == "Setup mode"
     assert translations["config"]["step"]["options"]["title"] == "Configure options"
 
 

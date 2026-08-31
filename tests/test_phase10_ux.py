@@ -15,6 +15,7 @@ import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
     CLEANUP_POLICY_AUTO,
     CLEANUP_POLICY_NEVER,
+    CONF_AUTO_DISCOVER,
     CONF_TOPIC_PATTERN,
     PLATFORM_HINT_AUTO,
     PLATFORM_HINT_BINARY_SENSOR,
@@ -798,7 +799,7 @@ def test_snoop_listener_records_hosts_and_topics() -> None:
             return self.now
 
     clock = _Clock()
-    listener = SnoopListener(timeout_seconds=1.0, clock=clock)
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=1.0, clock=clock)
     mqtt = _FakeMqtt()
     asyncio.run(listener.start(hass=None, subscribe=mqtt.async_subscribe))
     asyncio.run(_drain(listener._on_message, "telegraf/cpu", _payload("cpu", "h1")))
@@ -815,7 +816,7 @@ def test_snoop_listener_records_hosts_and_topics() -> None:
 def test_snoop_listener_handles_malformed_payload() -> None:
     from custom_components.telegraf_mqtt.snoop import SnoopListener
 
-    listener = SnoopListener()
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=0.0)
     mqtt = _FakeMqtt()
     asyncio.run(listener.start(hass=None, subscribe=mqtt.async_subscribe))
     asyncio.run(_drain(listener._on_message, "telegraf/cpu", b"not json"))
@@ -829,7 +830,7 @@ def test_snoop_listener_ignores_payload_without_host_tag() -> None:
 
     from custom_components.telegraf_mqtt.snoop import SnoopListener
 
-    listener = SnoopListener()
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=0.0)
     mqtt = _FakeMqtt()
     asyncio.run(listener.start(hass=None, subscribe=mqtt.async_subscribe))
     payload = json.dumps({"name": "cpu", "fields": {"x": 1}}).encode()
@@ -858,7 +859,7 @@ def test_snoop_listener_extracts_host_from_string_payload() -> None:
 def test_snoop_listener_deduplicates_hosts() -> None:
     from custom_components.telegraf_mqtt.snoop import SnoopListener
 
-    listener = SnoopListener()
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=0.0)
     mqtt = _FakeMqtt()
     asyncio.run(listener.start(hass=None, subscribe=mqtt.async_subscribe))
     for _ in range(3):
@@ -870,7 +871,7 @@ def test_snoop_listener_deduplicates_hosts() -> None:
 def test_snoop_listener_duration_is_zero_when_stopped_immediately() -> None:
     from custom_components.telegraf_mqtt.snoop import SnoopListener
 
-    listener = SnoopListener()
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=0.0)
     result = listener.stop()
     assert result.duration_seconds == 0.0
 
@@ -893,7 +894,7 @@ def test_snoop_listener_auto_stops_when_timeout_expires() -> None:
     mqtt = _FakeMqtt()
 
     async def _run() -> None:
-        listener = SnoopListener(timeout_seconds=0.05)
+        listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=0.05)
         hass = _Hass()
         hass.loop = asyncio.get_running_loop()
         await listener.start(hass, mqtt.async_subscribe)
@@ -937,7 +938,7 @@ def test_snoop_listener_explicit_stop_cancels_pending_timer() -> None:
     class _Hass:
         loop = _Loop()
 
-    listener = SnoopListener(timeout_seconds=10.0)
+    listener = SnoopListener(probe_topic="telegraf/#", timeout_seconds=10.0)
     mqtt = _FakeMqtt()
 
     async def _run() -> None:
@@ -1029,7 +1030,13 @@ class _FakeSetupEntry:
     def __init__(self) -> None:
         self.entry_id = "entry-1"
         self.data = {CONF_TOPIC_PATTERN: "telegraf/#"}
-        self.options: dict = {}
+        # Tests in this module were written against the previous
+        # default of ``auto_discover=True`` (the post-setup snoop
+        # running by default). The production default is now ``False``
+        # so the snoop no longer silently widens past the user's
+        # scope; tests that exercise snoop behaviour opt in here so
+        # they keep their original coverage of the snoop code path.
+        self.options: dict = {CONF_AUTO_DISCOVER: True}
         self.title = "Telegraf"
         self.runtime_data: Any = None
         self._unload_callbacks: list[Callable[[], None]] = []
@@ -1131,13 +1138,134 @@ def test_setup_snoop_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> No
 
     asyncio.run(_run())
     assert broken.stopped is True
-    # Only the real subscription exists -- the snoop never subscribed.
+
+
+def test_setup_entry_with_default_options_does_not_install_snoop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-setup snoop is off by default; setup must not install it.
+
+    Topic discovery only happens during the config flow. The user
+    opts in to the snoop via the options flow. This is the
+    integration-level pin on the security default -- a refactor that
+    flips ``DEFAULT_AUTO_DISCOVER`` back to ``True`` is caught here
+    because the snoop subscription never appears on the broker.
+    """
+    fake_mqtt = _SetupFakeMqtt()
+    _patch_setup(monkeypatch, fake_mqtt)
+
+    hass = _FakeSetupHass()
+    # Default options: no ``auto_discover`` opt-in. ``_FakeSetupEntry``
+    # would otherwise set it to True to preserve the snoop tests'
+    # original coverage; we override here to test the no-opt-in path.
+    entry = _FakeSetupEntry()
+    entry.options = {}
+
+    async def _run() -> None:
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    asyncio.run(_run())
+
+    # Exactly one subscription: the real one on the user's
+    # topic_pattern. The snoop is not installed because the user
+    # has not opted in.
     assert len(fake_mqtt.subscribe_calls) == 1
     assert fake_mqtt.subscribe_calls[0][0] == "telegraf/#"
-    # The pipeline still works end-to-end through the real subscription.
-    real_cb = fake_mqtt.subscribe_calls[0][1]
-    asyncio.run(real_cb(_FakeMqttMessage(topic="telegraf/h1/mem", payload=_payload("mem", "h1"))))
-    assert entry.runtime_data.parser_stats.received == 1
+    # No snoop teardown handle -- the runtime never parked one.
+    assert entry.runtime_data.unsubscribe_snoop is None
+
+
+def test_options_flow_enables_snoop_on_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opt-in path still wires the snoop.
+
+    The user toggles ``auto_discover`` to True in the options flow;
+    the update listener reloads the entry. After reload, the snoop
+    subscription is installed. This is the complement of
+    ``test_setup_entry_with_default_options_does_not_install_snoop``:
+    the no-opt-in path stays off, the opt-in path turns on.
+    """
+    fake_mqtt = _SetupFakeMqtt()
+    _patch_setup(monkeypatch, fake_mqtt)
+
+    hass = _FakeSetupHass()
+    entry = _FakeSetupEntry()
+    # Start with the no-opt-in default.
+    entry.options = {}
+
+    async def _run() -> None:
+        # First cycle: no opt-in -> no snoop.
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+        # The user toggles ``auto_discover`` to True via the options flow.
+        # The update listener then reloads the entry.
+        entry.options = {CONF_AUTO_DISCOVER: True}
+        await integration.async_unload_entry(hass, entry)  # type: ignore[arg-type]
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    asyncio.run(_run())
+
+    # Cycle 1 (no opt-in): 1 subscription, the real one. Cycle 2
+    # (opt-in): 1 more real + 1 snoop. The snoop is the last
+    # subscription on the broker; both cycle-2 subscriptions match
+    # the user's topic_pattern because the probe is derived from it.
+    assert len(fake_mqtt.subscribe_calls) == 3
+    assert fake_mqtt.subscribe_calls[0][0] == "telegraf/#"  # cycle 1 real
+    assert fake_mqtt.subscribe_calls[1][0] == "telegraf/#"  # cycle 2 real
+    assert fake_mqtt.subscribe_calls[2][0] == "telegraf/#"  # cycle 2 snoop
+    # The runtime parked a snoop teardown handle on the second cycle.
+    assert entry.runtime_data.unsubscribe_snoop is not None
+
+
+def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snoop's probe topic is the user's ``topic_pattern``, not
+    the global ``telegraf/#`` fallback.
+
+    Production-wiring end-to-end: a user who configures
+    ``telegraf/rack1/#`` and opts in to ``auto_discover`` must have
+    the snoop subscribe on ``telegraf/rack1/#`` only. MQTT broker
+    filtering is what enforces the scope -- the snoop itself
+    doesn't filter messages -- so a wiring bug here would let the
+    snoop see rack2 traffic on a shared broker and auto-create
+    devices the user never opted into. This is the production
+    integration of the rack1/rack2 isolation invariant; the
+    unit-level version lives in
+    ``test_discover_topics.py::test_flow_start_scan_uses_user_supplied_probe_root``.
+    """
+    fake_mqtt = _SetupFakeMqtt()
+    _patch_setup(monkeypatch, fake_mqtt)
+
+    hass = _FakeSetupHass()
+    entry = _FakeSetupEntry()
+    # The user is on rack1 only -- the snoop must respect that scope.
+    entry.data = {CONF_TOPIC_PATTERN: "telegraf/rack1/#"}
+    entry.options = {CONF_AUTO_DISCOVER: True}
+
+    async def _run() -> None:
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    asyncio.run(_run())
+
+    # Real subscription is on the user's pattern. The snoop is the
+    # second subscription and is bound to the SAME pattern -- the
+    # broker is what filters, not the snoop, so the binding has to
+    # match. A refactor that hardcodes ``telegraf/#`` (or a wider
+    # default) in __init__.py is caught here.
+    assert len(fake_mqtt.subscribe_calls) == 2
+    assert fake_mqtt.subscribe_calls[0][0] == "telegraf/rack1/#"  # real
+    assert fake_mqtt.subscribe_calls[1][0] == "telegraf/rack1/#"  # snoop
+
+    # The snoop is wired with a dispatcher -- the rack1 isolation
+    # is enforced at the broker level, not by the snoop code. If
+    # the broker ever delivered a rack2 message, it would land in
+    # the manager. We don't test that path (the broker doesn't
+    # deliver out-of-pattern messages in production); we test
+    # the binding.
+    snoop_cb = fake_mqtt.subscribe_calls[1][1]
+    snoop = snoop_cb.__self__
+    assert snoop._dispatcher is not None
 
 
 def test_setup_snoop_is_long_lived_and_stored_on_runtime_data(

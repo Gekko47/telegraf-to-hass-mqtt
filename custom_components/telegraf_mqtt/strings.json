@@ -3,12 +3,35 @@
     "step": {
       "user": {
         "title": "Configure Telegraf MQTT",
+        "description": "Choose how to set up the MQTT topic pattern.",
+        "data": {
+          "setup_mode": "Setup mode"
+        }
+      },
+      "manual_topic": {
+        "title": "Configure Telegraf MQTT",
+        "description": "Enter the MQTT topic pattern you want to subscribe to. Entities will be auto-detected from traffic under this pattern.",
         "data": {
           "topic_pattern": "MQTT topic pattern",
           "device_name": "Device name",
           "manufacturer": "Manufacturer",
           "model": "Model",
           "sw_version": "Software version"
+        }
+      },
+      "scan_settings": {
+        "title": "Discover topics",
+        "description": "The integration will listen to the broker for a short window and show you the topic prefixes it saw. You pick which ones to subscribe to. Topic discovery only happens during setup -- it does not stay running.",
+        "data": {
+          "scan_root_topic": "Scan root topic",
+          "scan_duration_seconds": "Scan duration (seconds, 5-300)"
+        }
+      },
+      "pick_topics": {
+        "title": "Pick topics to subscribe to",
+        "description": "These are the topic prefixes the broker carried during the scan. The ones that look Telegraf-shaped are pre-selected; deselect anything you do not want, or add a custom pattern. Topic-level isolation is preserved -- the integration will not silently widen past the prefix you choose.",
+        "data": {
+          "topic_pattern": "Topic prefixes"
         }
       },
       "reconfigure": {
@@ -37,6 +60,9 @@
     },
     "error": {
       "invalid_topic": "Enter a valid MQTT subscription topic.",
+      "invalid_duration": "Enter a duration between 5 and 300 seconds.",
+      "no_traffic_on_scan_root": "No traffic was seen on the scan root topic during the scan window. Try a wider scan root (e.g. telegraf/#) or run the scan again when more devices are publishing.",
+      "no_topics_selected": "Pick at least one topic prefix to subscribe to.",
       "required": "This field is required."
     },
     "abort": {
@@ -46,11 +72,11 @@
   "issues": {
     "overlap_topic_patterns": {
       "title": "Overlapping topic patterns",
-      "description": "This Telegraf MQTT entry\u0027s topic pattern \"{own_topic}\" overlaps with another entry \"{other_entry_title}\" whose pattern is \"{other_topic}\". The same MQTT messages will be processed by both entries, producing duplicate entities. Change one of the patterns so they cover distinct message streams."
+      "description": "This Telegraf MQTT entry's topic pattern \"{own_topic}\" overlaps with another entry \"{other_entry_title}\" whose pattern is \"{other_topic}\". The same MQTT messages will be processed by both entries, producing duplicate entities. Change one of the patterns so they cover distinct message streams."
     },
     "invalid_persisted_option": {
       "title": "Invalid Telegraf MQTT option(s)",
-      "description": "The persisted value for {options} is invalid. The integration fell back to default values ({defaults}) so setup could complete. Open the integration\u0027s options dialog and correct the values, or remove and re-add the entry to reset the options to defaults."
+      "description": "The persisted value for {options} is invalid. The integration fell back to default values ({defaults}) so setup could complete. Open the integration's options dialog and correct the values, or remove and re-add the entry to reset the options to defaults."
     }
   },
   "exceptions": {

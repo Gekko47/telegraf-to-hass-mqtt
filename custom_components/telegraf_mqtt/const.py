@@ -39,21 +39,37 @@ CONF_FIELD_OVERRIDE_ENTITY_CATEGORY = "entity_category"
 CONF_DEVICE_ID_STRATEGY = "device_id_strategy"
 DEFAULT_DEVICE_ID_STRATEGY = "host"
 VALID_DEVICE_ID_STRATEGIES = ("host", "host_topic", "topic_only")
-# Phase 10: enable the post-setup snoop listener that records what Telegraf
-# hosts are publishing on the broker, surfaces a Repairs hint if the user's
-# configured topic pattern matches nothing, and auto-extends the pattern
-# when new hosts appear under a sibling topic.
+# Post-setup snoop listener: when enabled, auto-picks up new Telegraf
+# hosts that appear under the entry's ``topic_pattern``. Default is off
+# because the probe runs on the same broker; a careless default would
+# probe a wider scope than the user-configured ``topic_pattern``. The
+# user opts in via the options flow.
+#
+# When opted in, ``__init__.py`` derives the snoop's probe topic from the
+# entry's ``topic_pattern`` via ``derive_probe_topic`` -- the snoop never
+# silently widens past the user's scope. Topic discovery (the
+# pick-from-traffic flow) lives in the config flow, not the options flow.
 CONF_AUTO_DISCOVER = "auto_discover"
-DEFAULT_AUTO_DISCOVER = True
-# How long the post-setup snoop listens before reporting what it saw.
-CONF_AUTO_DISCOVER_TIMEOUT = "auto_discover_timeout"
-DEFAULT_AUTO_DISCOVER_TIMEOUT = 10
-# The wildcard topic the snoop uses. Defaults to `telegraf/#` so it sees
-# every Telegraf message the broker is carrying, regardless of what the
-# user's configured topic pattern is.
-CONF_AUTO_DISCOVER_PROBE_TOPIC = "auto_discover_probe_topic"
+DEFAULT_AUTO_DISCOVER = False
+# Fallback used by ``SnoopListener`` and ``derive_probe_topic`` when no
+# pattern is supplied. Belt-and-braces: the integration always supplies a
+# pattern, so this only fires from code paths that haven't been wired up
+# yet.
 DEFAULT_AUTO_DISCOVER_PROBE_TOPIC = "telegraf/#"
 DEFAULT_TOPIC_PATTERN = "telegraf/#"
+# Config-flow "discover topics" mode. The user enters a probe topic and a
+# scan window; the integration listens for that window, then presents the
+# 2nd-level prefixes it saw so the user can pick which to subscribe to.
+CONF_SCAN_ROOT_TOPIC = "scan_root_topic"
+DEFAULT_SCAN_ROOT_TOPIC = "telegraf/#"
+CONF_SCAN_DURATION_SECONDS = "scan_duration_seconds"
+DEFAULT_SCAN_DURATION_SECONDS = 30
+MIN_SCAN_DURATION_SECONDS = 5
+MAX_SCAN_DURATION_SECONDS = 300
+# Config-flow mode discriminator (manual topic vs. discover topics).
+CONF_SETUP_MODE = "setup_mode"
+SETUP_MODE_MANUAL = "manual"
+SETUP_MODE_DISCOVER = "discover"
 DEFAULT_DEVICE_NAME = "Telegraf MQTT"
 DEFAULT_EXPIRE_AFTER = 120
 DEFAULT_ENABLE_CLEANUP = True

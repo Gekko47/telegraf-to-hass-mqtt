@@ -31,6 +31,7 @@ from conftest import (
 
 import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
+    CONF_AUTO_DISCOVER,
     CONF_DEVICE_NAME,
     CONF_TOPIC_PATTERN,
     DOMAIN,
@@ -72,7 +73,13 @@ class FakeConfigEntry:
             CONF_TOPIC_PATTERN: "telegraf/#",
             CONF_DEVICE_NAME: "Telegraf MQTT",
         }
-        self.options = {}
+        # Tests in this module were written against the previous
+        # default of ``auto_discover=True`` (the post-setup snoop
+        # running by default). The production default is now ``False``
+        # so the snoop no longer silently widens past the user's
+        # scope; tests that exercise snoop behaviour opt in here so
+        # they keep their original coverage.
+        self.options = {CONF_AUTO_DISCOVER: True}
         self.runtime_data: Any = None
         self._unload_callbacks: list[Callable[[], None]] = []
 

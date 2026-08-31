@@ -2,6 +2,102 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-08-31
+
+Two-path config flow + snoop safety cleanup + test-scope audit closure.
+This is a feature-level release: the user-facing onboarding now offers
+"discover topics from broker traffic" as a first-class alternative to
+typing a topic pattern, and the post-setup snoop no longer silently
+widens past the user's `topic_pattern` on a shared broker.
+
+### Added
+- **Two-path config flow** (`config_flow.py`): a mode picker at
+  `async_step_user` lets the user choose between **Manual** (enter a
+  topic pattern) and **Discover** (let the broker tell you what's
+  available). The discover path runs a short-lived snoop for the
+  configured scan window (5-300s, default 30), rolls the captured
+  topics up to 2nd-level prefixes (`telegraf/rack1/cpu` +
+  `telegraf/rack1/mem` → `telegraf/rack1/#`), pre-selects the
+  Telegraf-shaped ones, and creates the entry with the chosen
+  prefix. Telegraf-shaped pre-selection keeps the pick form useful
+  on a shared broker where HA-internal topics are also in the
+  scan results.
+- **User-supplied scan root**: the discover path's probe topic is
+  user-supplied (default `telegraf/#`) -- a user on `telegraf/rack1/#`
+  can scan just that subtree and the scan will not see rack2
+  traffic. Topic-level isolation is preserved end-to-end.
+
+### Changed
+- **`DEFAULT_AUTO_DISCOVER` flipped from `True` to `False`**
+  (`const.py`). Topic discovery now happens during the config flow
+  only. The post-setup snoop is opt-in via the options flow. A
+  `False` default closes the "shared-broker auto-widening" footgun
+  -- a user who wants the snoop to pick up new Telegraf hosts
+  under their existing pattern opts in explicitly.
+- **Post-setup snoop probe is derived from `topic_pattern`**
+  (`__init__.py`, `snoop.derive_probe_topic`). The snoop no longer
+  hardcodes `telegraf/#`; it subscribes to whatever the user
+  configured. A user on `telegraf/rack1/#` gets a snoop on
+  `telegraf/rack1/#` -- rack2 on the same broker stays invisible
+  to the auto-discover path.
+- **`SnoopListener.__init__` is explicit about its `probe_topic`
+  and `timeout_seconds`**. No defaults -- every callsite passes
+  both, and the integration's wiring is the one source of truth.
+  Trip wire: a refactor that hardcodes a wider probe is caught
+  by `test_setup_entry_rack1_topic_runs_snoop_on_rack1_only`.
+
+### Removed (loose code)
+Following SKILL4 ("every constant, helper, and test stub must have
+a callsite"):
+- `const.py`: `CONF_AUTO_DISCOVER_PROBE_TOPIC`,
+  `CONF_AUTO_DISCOVER_TIMEOUT`, `DEFAULT_AUTO_DISCOVER_TIMEOUT`.
+  The options-flow field and the diagnostics-probe path they
+  referenced were never built. `DEFAULT_AUTO_DISCOVER_PROBE_TOPIC`
+  remains as a fallback inside `derive_probe_topic` and
+  `SnoopListener`.
+- `snoop.py`: dead defaults on `SnoopListener.__init__` (every
+  production callsite passes them explicitly); an overly long
+  `derive_probe_topic` docstring that claimed a `+` → `#` widening
+  rule the function never implemented.
+- `config_flow.py`: `_synthesize_topic_pattern` (the production
+  code uses `picks[0]` directly), the module-level aliases
+  `roll_up_topics` / `synthesize_topic_pattern` /
+  `looks_telegraf_shaped` (no callers), and their `__all__` entries.
+- `tests/test_discover_topics.py`: 5 broken
+  `test_discover_path_*` tests that drove the real
+  `TelegrafMqttConfigFlow` under stubbed HA machinery; their
+  supporting `_FlowHass` / `_Flow` / `_install_fake_subscribe` /
+  `_drive_discover` stubs.
+- `tests/test_config_flow.py`: 2 dead `_synthesize_topic_pattern`
+  tests.
+
+### Test-scope audit closure
+A test-scope review found 10 gaps across 3 priorities, all
+closed in this release:
+- **Phase 1 — security posture**: `DEFAULT_AUTO_DISCOVER is False`
+  is pinned by a one-liner; the integration-level
+  `setup_entry_with_default_options_does_not_install_snoop` and
+  `options_flow_enables_snoop_on_reload` tests pin the no-opt-in
+  default and the opt-in path respectively.
+- **Phase 2 — discover-path coverage**: `_validate_scan_settings`
+  4 branches, both `async_step_pick_topics` error paths
+  (`invalid_topic`, `no_topics_selected`), and the
+  `_pick_topics_schema` pre-selection wiring are all pinned.
+- **Phase 3 — harness strength**: the rack1/rack2 isolation
+  invariant at the integration layer (not just on the snoop),
+  the roll-up's mixed single + multi-segment handling, and the
+  title-casing for dashes and non-ASCII inputs.
+- Total: 424 → 434 tests passing (no regressions). 100% coverage on
+  `custom_components/`. mypy --strict clean.
+
+### Documentation
+- `.cline/skills/SKILL4.md` (new): "streamlining -- drop every
+  constant, helper, and test stub that has no callsite." A
+  project-specific gotcha captured from this cleanup cycle. The
+  rule: a name without a production callsite is debt. Run the
+  audit, delete the name and the tests that exist only to pin
+  it.
+
 ## [1.2.0] - 2026-08-29
 
 Phase 10 — 🏆 Platinum quality-scale gate & HACS-release polish.

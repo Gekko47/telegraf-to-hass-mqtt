@@ -1015,13 +1015,21 @@ def test_every_descriptor_translation_key_has_en_json_entry() -> None:
 
 
 def test_sw_version_field_is_in_strings_and_en() -> None:
+    """The device-metadata fields (``sw_version`` et al.) now live on the
+    ``manual_topic`` step -- the ``user`` step is the mode picker. The
+    reconfigure step still carries the same fields. This test pins the
+    canonical location(s) so the strings stay in sync with the flow.
+    """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
     strings = json.loads((root / "custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
     en = json.loads((root / "custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8"))
-    assert "sw_version" in strings["config"]["step"]["user"]["data"]
-    assert "sw_version" in en["config"]["step"]["user"]["data"]
+    assert "sw_version" in strings["config"]["step"]["manual_topic"]["data"]
+    assert "sw_version" in en["config"]["step"]["manual_topic"]["data"]
+    # Reconfigure still surfaces the same metadata.
+    assert "sw_version" in strings["config"]["step"]["reconfigure"]["data"]
+    assert "sw_version" in en["config"]["step"]["reconfigure"]["data"]
 
 
 def test_reconfigure_step_is_in_strings_and_en() -> None:

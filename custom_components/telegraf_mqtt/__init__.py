@@ -76,7 +76,7 @@ from .repairs import (
     check_no_traffic,
     check_overlapping_topics,
 )
-from .snoop import SnoopListener
+from .snoop import SnoopListener, derive_probe_topic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -181,15 +181,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
 
         # Phase 10: post-setup snoop listener. Runs only when the user
-        # has the auto-discover option enabled (default on). The
-        # listener installs a second subscription on a wildcard topic
-        # and hands every captured message back to ``manager.process_message``
-        # so newly-seen Telegraf hosts become real devices and entities
-        # without the user having to add another config entry. The
-        # unsubscribe handle is stored on the runtime data and torn down
-        # in ``async_unload_entry``. The Repairs framework consults
+        # has the auto-discover option enabled (default off -- the user
+        # must opt in via the options flow). The listener installs a
+        # second subscription on a probe topic and hands every captured
+        # message back to ``manager.process_message`` so newly-seen
+        # Telegraf hosts become real devices and entities without the
+        # user having to add another config entry. The unsubscribe
+        # handle is stored on the runtime data and torn down in
+        # ``async_unload_entry``. The Repairs framework consults
         # ``manager.seen_hosts`` + ``seen_topics`` to raise a hint when
         # the configured topic pattern matches no traffic.
+        #
+        # The probe is derived from the user's ``topic_pattern`` so the
+        # snoop never silently widens past the user's scope. A user who
+        # configured ``telegraf/rack1/#`` will only have the snoop
+        # listen on ``telegraf/rack1/#`` -- the rack2 deployment on the
+        # same broker stays invisible to the auto-discover path.
         if options.auto_discover:
             # The dispatcher signature matches
             # ``DeviceManager.process_message(topic, payload)`` exactly,
@@ -201,6 +208,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Repairs hint.
             snoop = SnoopListener(
                 timeout_seconds=0.0,
+                probe_topic=derive_probe_topic(topic_pattern),
                 dispatcher=manager.process_message,
             )
             try:
@@ -277,8 +285,11 @@ class TelegrafMqttOptions:
     is unchanged from Phase 2.
 
     Phase 10: ``category_overrides`` and ``device_id_strategy`` are
-    user-facing. ``auto_discover`` is also user-facing (default on) and
-    controls whether the post-setup snoop listener runs.
+    user-facing. ``auto_discover`` is also user-facing (default off --
+    the user must opt in via the options flow) and controls whether
+    the post-setup snoop listener runs. When it does run, the probe
+    topic is derived from the entry's ``topic_pattern`` so the snoop
+    never silently widens past the user's scope.
     """
 
     expire_after: int
