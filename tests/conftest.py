@@ -166,6 +166,9 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
     def async_dispatcher_connect(_hass, _signal, target):
         return lambda: None
 
+    def async_dispatcher_send(_hass, _signal, *args):
+        return None
+
     def add_entities(entities) -> None:
         for entity in entities:
             entity.write_count = 0
@@ -181,6 +184,7 @@ def _build_ha_stub_modules() -> dict[str, types.ModuleType]:
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    dispatcher.async_dispatcher_send = async_dispatcher_send
     entity_platform.AddEntitiesCallback = add_entities
 
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")

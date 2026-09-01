@@ -183,7 +183,7 @@ def _options_validity(raw_options: Mapping[str, Any]) -> dict[str, bool]:
             return True
         try:
             value = int(raw_options[name])
-        except TypeError, ValueError:
+        except (TypeError, ValueError):  # fmt: skip
             return False
         return value >= minimum
 

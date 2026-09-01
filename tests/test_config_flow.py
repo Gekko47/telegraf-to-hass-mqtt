@@ -98,9 +98,7 @@ def test_roll_up_topics_handles_single_segment() -> None:
 def test_roll_up_topics_is_sorted_and_deduped() -> None:
     """Many leaves under the same prefix collapse to one pick; the
     result is sorted for stable UI rendering."""
-    seen = frozenset(
-        f"telegraf/host{i}/{kind}" for i in range(5) for kind in ("cpu", "mem")
-    )
+    seen = frozenset(f"telegraf/host{i}/{kind}" for i in range(5) for kind in ("cpu", "mem"))
     result = _roll_up_topics(seen)
     assert result == [
         "telegraf/host0/#",
@@ -128,33 +126,25 @@ def test_validate_scan_settings_rejects_invalid_inputs() -> None:
     flow = TelegrafMqttConfigFlow()
 
     # Bad probe root: same rule as the manual topic.
-    errors = flow._validate_scan_settings(
-        {CONF_SCAN_ROOT_TOPIC: "telegraf/#/bad", CONF_SCAN_DURATION_SECONDS: 30}
-    )
+    errors = flow._validate_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#/bad", CONF_SCAN_DURATION_SECONDS: 30})
     assert errors == {CONF_SCAN_ROOT_TOPIC: "invalid_topic"}
 
     # Non-integer duration: caught before the range check.
     for bad in (None, "abc", 1.5):
-        errors = flow._validate_scan_settings(
-            {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: bad}
-        )
+        errors = flow._validate_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: bad})
         assert errors == {CONF_SCAN_DURATION_SECONDS: "invalid_duration"}, (
             f"expected invalid_duration for {bad!r}, got {errors!r}"
         )
 
     # Out-of-range integer duration: caught by the range check.
     for bad in (MIN_SCAN_DURATION_SECONDS - 1, MAX_SCAN_DURATION_SECONDS + 1):
-        errors = flow._validate_scan_settings(
-            {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: bad}
-        )
+        errors = flow._validate_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: bad})
         assert errors == {CONF_SCAN_DURATION_SECONDS: "invalid_duration"}, (
             f"expected invalid_duration for {bad!r}, got {errors!r}"
         )
 
     # Happy path: returns an empty dict.
-    errors = flow._validate_scan_settings(
-        {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 30}
-    )
+    errors = flow._validate_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 30})
     assert errors == {}
 
 

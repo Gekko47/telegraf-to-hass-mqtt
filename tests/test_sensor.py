@@ -60,6 +60,9 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     def async_dispatcher_connect(hass, signal, target):
         return lambda: None
 
+    def async_dispatcher_send(hass, signal, *args):
+        return None
+
     sensor.SensorEntity = SensorEntity
     sensor.SensorDeviceClass = SensorDeviceClass
     sensor.SensorStateClass = SensorStateClass
@@ -70,6 +73,7 @@ def _install_sensor_homeassistant_stubs(monkeypatch) -> None:
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    dispatcher.async_dispatcher_send = async_dispatcher_send
     entity_platform.AddEntitiesCallback = object
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")
     entity_helpers.EntityCategory = StubEntityCategory

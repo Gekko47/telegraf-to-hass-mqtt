@@ -11,9 +11,12 @@ present.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+import pytest
 
 from custom_components.telegraf_mqtt.config_flow import (
     _MAX_PICK_LIST_OPTIONS,
@@ -23,11 +26,15 @@ from custom_components.telegraf_mqtt.config_flow import (
     _roll_up_topics,
 )
 from custom_components.telegraf_mqtt.const import (
+    CONF_SCAN_DURATION_SECONDS,
+    CONF_SCAN_ROOT_TOPIC,
+    CONF_SETUP_MODE,
     CONF_TOPIC_PATTERN,
     DEFAULT_AUTO_DISCOVER,
     DEFAULT_AUTO_DISCOVER_PROBE_TOPIC,
+    SETUP_MODE_DISCOVER,
 )
-from custom_components.telegraf_mqtt.snoop import SnoopListener, derive_probe_topic
+from custom_components.telegraf_mqtt.snoop import SnoopListener, SnoopResult, derive_probe_topic
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +114,7 @@ def test_roll_up_groups_rack1_and_rack2_separately() -> None:
 
 
 def test_roll_up_dedupes_many_leaves_to_one_prefix() -> None:
-    seen = frozenset(
-        f"telegraf/host{i}/{kind}" for i in range(50) for kind in ("cpu", "mem", "disk")
-    )
+    seen = frozenset(f"telegraf/host{i}/{kind}" for i in range(50) for kind in ("cpu", "mem", "disk"))
     result = _roll_up_topics(seen)
     assert len(result) == 50
     assert all(p.startswith("telegraf/host") and p.endswith("/#") for p in result)
@@ -175,9 +180,7 @@ class _FakeMqtt:
         self.subscribed_topics.append((topic, callback))
 
         def _unsub() -> None:
-            self.subscribed_topics = [
-                entry for entry in self.subscribed_topics if entry[1] is not callback
-            ]
+            self.subscribed_topics = [entry for entry in self.subscribed_topics if entry[1] is not callback]
 
         return _unsub
 
@@ -306,9 +309,7 @@ def test_pick_topics_invalid_pick_returns_invalid_topic_error() -> None:
     async def _run() -> None:
         # Mix a valid pre-selected Telegraf pick with a hand-typed junk
         # topic; only the junk should fail the validator.
-        result = await flow.async_step_pick_topics(
-            {CONF_TOPIC_PATTERN: ["telegraf/rack1/#", "garbage/topic/#/bad"]}
-        )
+        result = await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: ["telegraf/rack1/#", "garbage/topic/#/bad"]})
         assert result["type"] == "form"
         assert result["step_id"] == "pick_topics"
         assert result["errors"] == {CONF_TOPIC_PATTERN: "invalid_topic"}
@@ -377,3 +378,270 @@ def test_pick_topics_schema_pre_selects_only_telegraf_shaped_prefixes() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Discover-path: the full scan pipeline (settings -> running -> pick).
+# ---------------------------------------------------------------------------
+# The v1.3.0 release shipped the discover runtime path in ``config_flow.py``
+# (scan-settings submit, the scan window, the pick-submit create path, and
+# ``_start_scan``) without any test driving it, which silently broke the
+# repo's 100% coverage gate: ``config_flow.py`` sat at ~80% in every run.
+# These tests restore that coverage harness-free -- the REAL step methods
+# run against a fake broker and a flow whose ``hass.loop.call_later`` parks
+# the snoop's auto-stop timer, so each test fires the stop deterministically
+# instead of sleeping out the scan window.
+
+
+class _ParkedTimer:
+    """``TimerHandle``-shaped double returned by ``_FakeFlowLoop.call_later``."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _FakeFlowLoop:
+    """Event-loop double: ``call_later`` parks the snoop's auto-stop timer.
+
+    The real loop would fire the timer after the full scan window (>= 5 s
+    of wall time); parking it lets each test inject traffic and then fire
+    the stop synchronously and instantly.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self.timers: list[_ParkedTimer] = []
+
+    def call_later(self, _delay: float, _callback: Callable[..., None], *_args: Any) -> _ParkedTimer:
+        timer = _ParkedTimer()
+        self.timers.append(timer)
+        return timer
+
+    def __getattr__(self, name: str) -> Any:
+        # Everything else (call_soon, call_at, time, ...) delegates to the
+        # real running loop.
+        return getattr(self._loop, name)
+
+
+def _make_scan_flow() -> tuple[TelegrafMqttConfigFlow, list[dict[str, Any]], list[Callable[[], None]]]:
+    """Build a config flow ready for the scan-pipeline tests.
+
+    Stubs the FlowHandler result-builders (a bare instance carries no
+    ``flow_id``, so the real methods cannot run outside HA's flow manager
+    -- same pattern as ``_make_flow_with_seen``) and arms an
+    ``async_on_unload`` recorder so ``_start_scan``'s teardown registration
+    is observable regardless of the installed HA version. Returns
+    ``(flow, forms, unload_hooks)``.
+    """
+    flow = TelegrafMqttConfigFlow()
+    forms: list[dict[str, Any]] = []
+
+    def _show_form(*, step_id: str, data_schema: Any = None, errors: dict | None = None, **_kw: Any) -> dict[str, Any]:
+        record = {"type": "form", "step_id": step_id, "data_schema": data_schema, "errors": dict(errors or {})}
+        forms.append(record)
+        return record
+
+    def _create_entry(*, title: str | None = None, data: Any = None, **_kw: Any) -> dict[str, Any]:
+        return {"type": "create_entry", "title": title, "data": dict(data or {})}
+
+    async def _set_unique_id(*_a: Any, **_kw: Any) -> None:
+        return None
+
+    flow.async_show_form = _show_form  # type: ignore[method-assign]
+    flow.async_create_entry = _create_entry  # type: ignore[method-assign]
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign,assignment]
+    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[method-assign]
+    unload_hooks: list[Callable[[], None]] = []
+    flow.async_on_unload = unload_hooks.append  # type: ignore[method-assign]
+    # ``hass.loop`` is deliberately not armed here: ``get_running_loop()``
+    # only works inside a coroutine, so the scan-pipeline tests arm the
+    # fake loop inside their ``_run()`` before starting the step task.
+    flow.hass = type("H", (), {})()  # type: ignore[assignment]
+    return flow, forms, unload_hooks
+
+
+def test_scan_settings_invalid_submit_rerenders_with_errors() -> None:
+    """A bad probe root and an out-of-range duration rerender the form.
+
+    Covers the submit branch of ``async_step_scan_settings`` including the
+    schema rebuild for the error render.
+    """
+    flow, forms, _hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        return await flow.async_step_scan_settings(
+            {CONF_SCAN_ROOT_TOPIC: "telegraf/#/bad", CONF_SCAN_DURATION_SECONDS: 1}
+        )
+
+    result = asyncio.run(_run())
+    assert result["type"] == "form"
+    assert result["step_id"] == "scan_settings"
+    assert result["errors"] == {
+        CONF_SCAN_ROOT_TOPIC: "invalid_topic",
+        CONF_SCAN_DURATION_SECONDS: "invalid_duration",
+    }
+    assert forms and forms[-1]["step_id"] == "scan_settings"
+
+
+def test_user_menu_discover_branch_shows_scan_settings() -> None:
+    """Choosing the discover mode routes ``async_step_user`` to the
+    scan-settings form (the manual branch is pinned by the harness
+    tests)."""
+    flow, forms, _hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        return await flow.async_step_user({CONF_SETUP_MODE: SETUP_MODE_DISCOVER})
+
+    result = asyncio.run(_run())
+    assert result["type"] == "form"
+    assert result["step_id"] == "scan_settings"
+    assert forms and forms[-1]["step_id"] == "scan_settings"
+
+
+def test_scan_pipeline_valid_settings_reaches_pick_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings submit -> live snoop scan -> pick list, end to end.
+
+    The fake loop parks the snoop's auto-stop timer: the test injects
+    rack1 traffic while the scan is running and then fires the parked
+    stop, so the whole scan window elapses instantly. Also pins the
+    ``_start_scan`` teardown contract: the snoop's ``stop`` is registered
+    on the flow's unload hooks (so a user cancelling the flow mid-scan
+    cannot leak the broker subscription), and ``stop()`` cancels the
+    parked timer and unsubscribes.
+    """
+    mqtt = _FakeMqtt()
+    monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
+    flow, forms, unload_hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
+        task = asyncio.ensure_future(
+            flow.async_step_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5})
+        )
+        # Wait for the scan subscription to be installed on the broker.
+        while not mqtt.subscribed_topics:
+            await asyncio.sleep(0)
+        assert mqtt.subscribed_topics[0][0] == "telegraf/#"
+        # Traffic during the scan window: only rack1 shows up.
+        await _drain(mqtt.subscribed_topics[0][1], "telegraf/rack1/cpu", b"")
+        await _drain(mqtt.subscribed_topics[0][1], "telegraf/rack1/mem", b"")
+        while flow._scan_snoop is None:
+            await asyncio.sleep(0)
+        # The unload hook is the snoop's own stop; firing the parked
+        # auto-stop timer cancels the timer handle and unsubscribes.
+        assert unload_hooks and unload_hooks[0].__self__ is flow._scan_snoop
+        flow._scan_snoop._on_timeout()
+        assert flow.hass.loop.timers and flow.hass.loop.timers[0].cancelled
+        assert mqtt.subscribed_topics == []
+        return await asyncio.wait_for(task, 5)
+
+    result = asyncio.run(_run())
+    assert result["type"] == "form"
+    assert result["step_id"] == "pick_topics"
+    assert flow._scan_seen_topics == {"telegraf/rack1/cpu", "telegraf/rack1/mem"}
+    assert forms and forms[-1]["step_id"] == "pick_topics"
+
+
+def test_scan_pipeline_no_traffic_returns_to_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scan window with zero traffic reroutes to the settings form with
+    a clear error, and the subscription is still torn down."""
+    mqtt = _FakeMqtt()
+    monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
+    flow, _forms, _hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
+        task = asyncio.ensure_future(
+            flow.async_step_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5})
+        )
+        while not mqtt.subscribed_topics:
+            await asyncio.sleep(0)
+        while flow._scan_snoop is None:
+            await asyncio.sleep(0)
+        flow._scan_snoop._on_timeout()
+        return await asyncio.wait_for(task, 5)
+
+    result = asyncio.run(_run())
+    assert result["type"] == "form"
+    assert result["step_id"] == "scan_settings"
+    assert result["errors"] == {"base": "no_traffic_on_scan_root"}
+    assert mqtt.subscribed_topics == []
+
+
+def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A snoop that never finishes is force-stopped at the deadline.
+
+    Guards the leak path the scan relies on: if the auto-stop timer
+    misfires (``is_finished`` stays False), the step's own
+    ``asyncio.timeout`` deadline must stop the snoop explicitly -- the
+    broker subscription cannot outlive the flow -- and the flow must
+    still continue with whatever the snoop managed to capture. Driving
+    ``async_step_scan_running`` with no prior settings submit also covers
+    the default-fill branch.
+    """
+    stop_calls = 0
+
+    class _StuckSnoop:
+        """Snoop double whose auto-stop never flips ``is_finished``."""
+
+        @property
+        def is_finished(self) -> bool:
+            return False
+
+        def stop(self) -> SnoopResult:
+            nonlocal stop_calls
+            stop_calls += 1
+            return SnoopResult(
+                hosts=frozenset({"rack1"}),
+                topics=frozenset({"telegraf/rack1/cpu"}),
+                duration_seconds=0.0,
+            )
+
+    async def _fake_start_scan(_self: Any, _probe: str, _duration: float) -> _StuckSnoop:
+        return _StuckSnoop()
+
+    @contextlib.asynccontextmanager
+    async def _instant_timeout(_deadline: float) -> Any:
+        raise TimeoutError
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("custom_components.telegraf_mqtt.config_flow.asyncio.timeout", _instant_timeout)
+    monkeypatch.setattr(TelegrafMqttConfigFlow, "_start_scan", _fake_start_scan)
+    monkeypatch.setattr(TelegrafMqttConfigFlow, "_scan_duration", None)
+    flow, forms, _hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        return await flow.async_step_scan_running()
+
+    result = asyncio.run(_run())
+    # Force-stopped (not left running), then read once more for the result.
+    assert stop_calls >= 1
+    assert result["type"] == "form"
+    assert result["step_id"] == "pick_topics"
+    assert flow._scan_seen_topics == {"telegraf/rack1/cpu"}
+    assert forms and forms[-1]["step_id"] == "pick_topics"
+
+
+def test_pick_topics_submit_creates_entry() -> None:
+    """Submitting a valid pick pins the first pick as the topic pattern
+    and creates the entry (the single-subscription limitation: extra
+    picks are ignored)."""
+    flow, _forms, _hooks = _make_scan_flow()
+    flow._scan_seen_topics = frozenset({"telegraf/rack1/cpu", "telegraf/rack2/cpu"})
+    unique_ids: list[str] = []
+
+    async def _set_unique_id(unique_id: str | None) -> None:
+        unique_ids.append(unique_id or "")
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign,assignment]
+
+    async def _run() -> dict[str, Any]:
+        return await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: ["telegraf/rack2/#", "telegraf/rack1/#"]})
+
+    result = asyncio.run(_run())
+    assert result["type"] == "create_entry"
+    # The first pick wins; the device title derives from it.
+    assert result["data"][CONF_TOPIC_PATTERN] == "telegraf/rack2/#"
+    assert result["title"] == "Telegraf"
+    assert unique_ids == ["telegraf/rack2/#"]

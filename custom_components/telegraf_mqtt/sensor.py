@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -18,6 +18,7 @@ from .const import (
     PLATFORM_HINT_SENSOR,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_NEW_METRIC,
+    SIGNAL_REMOVE_METRIC,
 )
 from .heuristics import ENTITY_CATEGORY_DIAGNOSTIC
 from .icons import ICON_FOR_KEY
@@ -50,6 +51,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         added.add(metric_key)
         async_add_entities([TelegrafMqttSensor(entry, metric_key)])
 
+    # Phase 10 platform re-routing: ``field_overrides`` can flip a bool
+    # field's ``platform_hint`` (sensor <-> binary_sensor, or ``none``)
+    # after the entity has already been added, and the entity must move
+    # -- otherwise the user sees a bool value rendered as a "True/False"
+    # sensor string on the wrong platform until they reload the config
+    # entry. The registry's ``apply_options`` re-applies the override and
+    # fires ``SIGNAL_METRIC_UPDATED`` for every changed state; both
+    # platforms re-evaluate routing on that tick: the platform that no
+    # longer owns the metric drops it from ``added`` and fires
+    # ``SIGNAL_REMOVE_METRIC`` (the integration's
+    # ``_listener_remove_metric`` removes the entity from HA's entity
+    # registry), while the platform that now owns it re-adds it through
+    # the same forward check ``add_metric`` uses -- no reload needed.
+    @callback
+    def reevaluate_routing(metric_key: str) -> None:
+        state = manager.get_metric(metric_key)
+        if state is None:
+            return
+        # Same forward check as ``add_metric``, inverted: if a bool
+        # field is no longer pinned to ``sensor`` it belongs on the
+        # binary_sensor platform (or, with ``hint=none``, nowhere).
+        if is_bool_metric(state.value) and state.descriptor.platform_hint != PLATFORM_HINT_SENSOR:
+            if metric_key in added:
+                added.discard(metric_key)
+                async_dispatcher_send(
+                    hass,
+                    SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
+                    metric_key,
+                )
+            return
+        # This platform now owns the metric (or the flip was undone):
+        # route through ``add_metric`` so the dedup guard and the
+        # platform check live in exactly one place. No-op while the
+        # metric is already added here.
+        add_metric(metric_key)
+
     for metric_key in manager:
         add_metric(metric_key)
 
@@ -58,6 +95,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             hass,
             SIGNAL_NEW_METRIC.format(entry_id=entry.entry_id),
             add_metric,
+        )
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
+            reevaluate_routing,
         )
     )
 

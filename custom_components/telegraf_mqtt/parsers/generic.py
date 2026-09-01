@@ -53,7 +53,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
 
     try:
         timestamp_float = float(timestamp)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         _LOGGER.debug("Unsupported Telegraf payload shape")
         return []
 

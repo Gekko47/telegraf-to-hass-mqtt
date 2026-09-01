@@ -17,14 +17,19 @@ from dataclasses import dataclass, field
 import pytest
 
 from custom_components.telegraf_mqtt.const import (
+    PLATFORM_HINT_BINARY_SENSOR,
+    PLATFORM_HINT_NONE,
+    PLATFORM_HINT_SENSOR,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_NEW_METRIC,
+    SIGNAL_REMOVE_METRIC,
 )
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.registry import DeviceManager
 
 ENTRY_ID = "entry-1"
 _TARGETS_HOLDER: dict[str, list] = {"targets": {}}
+_SENDS_HOLDER: dict[str, list] = {"sends": []}
 
 
 def _install_platform_stubs(monkeypatch) -> dict[str, list]:
@@ -68,6 +73,14 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
         targets.setdefault(signal, []).append(target)
         return lambda: None
 
+    # Phase 10 re-routing fires ``SIGNAL_REMOVE_METRIC`` from the
+    # platform's ``reevaluate_routing`` listener; record every send so
+    # the rerouting tests can assert the exact signal payloads.
+    sends = _SENDS_HOLDER["sends"]
+
+    def async_dispatcher_send(_hass, signal, *args):
+        sends.append((signal, *args))
+
     sensor.SensorEntity = StubEntity
     binary_sensor.BinarySensorEntity = StubEntity
     config_entries.ConfigEntry = object
@@ -76,6 +89,7 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     core.callback = callback
     device_registry.DeviceInfo = dict
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    dispatcher.async_dispatcher_send = async_dispatcher_send
     entity_helpers = types.ModuleType("homeassistant.helpers.entity")
 
     class StubEntityCategory(enum.StrEnum):
@@ -165,6 +179,11 @@ def _setup_platform(module, manager):
 
 @pytest.fixture()
 def platform_env(monkeypatch):
+    # Per-test isolation: the holders are module-level so the stub
+    # closures can reach them; stale targets/sends must never leak
+    # between tests.
+    _TARGETS_HOLDER["targets"] = {}
+    _SENDS_HOLDER["sends"] = []
     _install_platform_stubs(monkeypatch)
     yield
 
@@ -339,3 +358,170 @@ def test_non_diagnostic_descriptors_leave_entity_category_none(platform_env) -> 
 
     assert sensor_added[0]._attr_entity_category is None
     assert binary_added[0]._attr_entity_category is None
+
+
+# --- Phase 10 live platform re-routing --------------------------------------
+#
+# ``apply_options`` re-applies ``field_overrides`` and fires
+# ``SIGNAL_METRIC_UPDATED`` (through ``__init__.py``'s ``on_write`` wiring)
+# for every changed state; both platforms must reconcile their routing on
+# that tick: the loser fires ``SIGNAL_REMOVE_METRIC`` (``__init__.py``'s
+# ``_listener_remove_metric`` drops the entity), the winner re-adds it.
+
+
+def _bridge(targets: dict[str, list], signal: str):
+    """Mirror ``__init__.py``'s options-update ``on_write`` wiring: a registry
+    write fans out as a ``SIGNAL_METRIC_UPDATED`` dispatch to every platform
+    target subscribed by ``async_setup_entry``."""
+
+    def on_write(metric_key: str, _available: bool, _value: object) -> None:
+        for target in targets[signal]:
+            target(metric_key)
+
+    return on_write
+
+
+def test_sensor_hint_flip_to_binary_sensor_reroutes_live(platform_env) -> None:
+    """``platform`` flipped sensor -> binary_sensor: the sensor platform
+    drops its entity and fires ``SIGNAL_REMOVE_METRIC`` on the update tick,
+    while the binary_sensor platform re-adds the metric on the same tick."""
+    sensor_module = _fresh_module("sensor")
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("link_up", True, platform_hint=PLATFORM_HINT_SENSOR))
+
+    sensor_added, targets, _entry = _setup_platform(sensor_module, manager)
+    binary_added, _btargets, _bentry = _setup_platform(binary_module, manager)
+
+    assert len(sensor_added) == 1  # the bool was pinned to the sensor platform
+    assert binary_added == []  # ... so binary_sensor skipped it
+
+    updated_signal = SIGNAL_METRIC_UPDATED.format(entry_id=ENTRY_ID)
+    remove_signal = SIGNAL_REMOVE_METRIC.format(entry_id=ENTRY_ID)
+    manager.apply_options(
+        field_overrides={"link_up": {"platform": PLATFORM_HINT_BINARY_SENSOR}},
+        on_write=_bridge(targets, updated_signal),
+    )
+
+    # Exactly one remove signal, carrying the composite metric key.
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+    # The binary_sensor platform picked the metric up without a reload.
+    assert len(binary_added) == 1
+    assert binary_added[0]._attr_unique_id == "telegraf_mqtt_host1_link_up"
+
+    # Re-firing the tick is idempotent: the metric is no longer in the
+    # sensor platform's ``added`` set and the binary platform dedups.
+    for target in targets[updated_signal]:
+        target("host1:link_up")
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+
+    # Unknown metric keys are guarded off before any dispatch.
+    for target in targets[updated_signal]:
+        target("host1:bogus")
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+
+
+def test_binary_sensor_hint_flip_to_sensor_reroutes_live(platform_env) -> None:
+    """``platform`` flipped binary_sensor -> sensor: the binary_sensor platform
+    fires ``SIGNAL_REMOVE_METRIC`` on the update tick and the sensor platform
+    picks the metric back up. A value change while still auto-routed must not
+    dispatch anything (the metric stays put)."""
+    sensor_module = _fresh_module("sensor")
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("link_up", True))
+
+    sensor_added, targets, _entry = _setup_platform(sensor_module, manager)
+    binary_added, _btargets, _bentry = _setup_platform(binary_module, manager)
+
+    assert sensor_added == []  # auto-routed bools stay off the sensor platform
+
+    updated_signal = SIGNAL_METRIC_UPDATED.format(entry_id=ENTRY_ID)
+    remove_signal = SIGNAL_REMOVE_METRIC.format(entry_id=ENTRY_ID)
+
+    def registry_bridge(metric_key: str, _available: bool, _value: object) -> None:
+        # Direct ``registry.update`` calls emit registry-local keys; the
+        # manager's dispatcher wiring prefixes the device id.
+        for target in targets[updated_signal]:
+            target(f"host1:{metric_key}")
+
+    # Value flip while still auto-routed: binary keeps the entity, the
+    # sensor platform's re-evaluator ignores the bool it does not own.
+    registry.update(_descriptor("link_up", False), on_write=registry_bridge)
+    assert _SENDS_HOLDER["sends"] == []
+    assert len(binary_added) == 1
+    assert binary_added[0].is_on is False
+
+    manager.apply_options(
+        field_overrides={"link_up": {"platform": PLATFORM_HINT_SENSOR}},
+        on_write=_bridge(targets, updated_signal),
+    )
+
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+    assert len(sensor_added) == 1
+    assert sensor_added[0]._attr_unique_id == "telegraf_mqtt_host1_link_up"
+
+
+def test_hint_none_flip_removes_entity_and_lands_nowhere(platform_env) -> None:
+    """``platform=none`` excludes the field everywhere: the owning platform
+    fires ``SIGNAL_REMOVE_METRIC`` and neither platform re-adds it -- not on
+    the update tick, and not on a later new-metric tick."""
+    sensor_module = _fresh_module("sensor")
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("link_up", True, platform_hint=PLATFORM_HINT_SENSOR))
+
+    _sensor_added, targets, _entry = _setup_platform(sensor_module, manager)
+    binary_added, _btargets, _bentry = _setup_platform(binary_module, manager)
+
+    updated_signal = SIGNAL_METRIC_UPDATED.format(entry_id=ENTRY_ID)
+    new_metric_signal = SIGNAL_NEW_METRIC.format(entry_id=ENTRY_ID)
+    remove_signal = SIGNAL_REMOVE_METRIC.format(entry_id=ENTRY_ID)
+
+    manager.apply_options(
+        field_overrides={"link_up": {"platform": PLATFORM_HINT_NONE}},
+        on_write=_bridge(targets, updated_signal),
+    )
+
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+    assert binary_added == []
+
+    # Even a fresh new-metric tick must not resurrect the excluded field:
+    # add_metric rejects sensor-pinned and excluded hints on both platforms.
+    for target in targets[new_metric_signal]:
+        target("host1:link_up")
+    assert binary_added == []
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+    assert registry.get("link_up") is not None  # state lingers until the next publish drops it
+
+
+def test_value_type_change_reroutes_between_platforms(platform_env) -> None:
+    """A bool metric that stops being boolean (Telegraf starts sending 0/1
+    ints after a config change) leaves the binary_sensor platform and lands
+    on the sensor platform without a reload."""
+    sensor_module = _fresh_module("sensor")
+    binary_module = _fresh_module("binary_sensor")
+    manager = DeviceManager()
+    registry = manager.get_or_create_registry("host1", "host1")
+    registry.update(_descriptor("link_up", True))
+
+    sensor_added, targets, _entry = _setup_platform(sensor_module, manager)
+    binary_added, _btargets, _bentry = _setup_platform(binary_module, manager)
+
+    assert len(binary_added) == 1
+
+    updated_signal = SIGNAL_METRIC_UPDATED.format(entry_id=ENTRY_ID)
+    remove_signal = SIGNAL_REMOVE_METRIC.format(entry_id=ENTRY_ID)
+
+    def registry_bridge(metric_key: str, _available: bool, _value: object) -> None:
+        for target in targets[updated_signal]:
+            target(f"host1:{metric_key}")
+
+    registry.update(_descriptor("link_up", 7), on_write=registry_bridge)
+
+    assert _SENDS_HOLDER["sends"] == [(remove_signal, "host1:link_up")]
+    assert len(sensor_added) == 1
+    assert sensor_added[0].native_value == 7

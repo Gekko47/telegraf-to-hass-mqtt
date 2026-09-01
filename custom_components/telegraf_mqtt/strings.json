@@ -50,11 +50,16 @@
         "data": {
           "exclude_patterns": "Exclude patterns",
           "field_overrides": "Field overrides",
+          "category_overrides": "Category overrides",
           "expire_after": "Expire after",
           "enable_cleanup": "Enable automatic cleanup",
           "cleanup_delay": "Cleanup delay (seconds)",
           "delete_delay": "Delete delay (seconds)",
           "min_active_metrics": "Minimum active metrics per device"
+        },
+        "data_description": {
+          "exclude_patterns": "Glob patterns matched against each metric's unique key; matching metrics are hidden and marked unavailable.",
+          "category_overrides": "Map of metric unique keys -- or glob patterns like mem_* -- to config, diagnostic, or null. An exact key always wins over a glob; the first matching glob in definition order is used."
         }
       }
     },

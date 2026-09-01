@@ -22,7 +22,7 @@ from .const import (
     VALID_PLATFORM_HINTS,
 )
 from .models import MetricDescriptor, PlatformHint, coerce_to_bool
-from .naming import apply_category_override
+from .naming import apply_category_override, match_category_override_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,13 +35,16 @@ def _resolve_category_for(
 ) -> str | None:
     """Return the entity category after applying the per-entity override.
 
-    Returns ``descriptor.entity_category`` unchanged when no override
-    key is present. Re-resolving the heuristic unconditionally would
-    stomp on descriptors that were constructed with a non-default
-    category (e.g. in tests, or by a future feature that wants a
-    different baseline).
+    Override keys may be exact ``unique_key`` strings or glob patterns
+    (matched via ``naming.match_category_override_key``: exact key
+    wins, then the first matching glob in insertion order). Returns
+    ``descriptor.entity_category`` unchanged when no override key
+    matches. Re-resolving the heuristic unconditionally would stomp on
+    descriptors that were constructed with a non-default category
+    (e.g. in tests, or by a future feature that wants a different
+    baseline).
     """
-    if not overrides or descriptor.unique_key not in overrides:
+    if not overrides or match_category_override_key(descriptor.unique_key, overrides) is None:
         return descriptor.entity_category
     return apply_category_override(
         descriptor.measurement,
@@ -49,6 +52,42 @@ def _resolve_category_for(
         descriptor.unique_key,
         overrides,
     )
+
+
+# Host tags that the user *cannot* reasonably expect to disambiguate two
+# physical machines. Telegraf's default ``[agent].hostname`` falls back to
+# the local machine name, and an unattended install on Docker / a
+# misconfigured agent can land on any of these. ``_derive_device_id``'s
+# ``host_topic`` strategy treats these as "no host tag at all" so the
+# second-level topic segment gets to do the disambiguating work.
+#
+# The set is lowercased; comparisons must be lowercased too. The literal
+# string ``"host"`` is included because it's a placeholder users (and
+# some test fixtures) sometimes publish when the real value is missing.
+_DEGENERATE_HOST_TAGS: frozenset[str] = frozenset(
+    {
+        "",
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "host",
+    }
+)
+
+
+def _is_degenerate_host(value: object) -> bool:
+    """Return True when a host tag is not a reliable per-machine identifier.
+
+    Used by ``DeviceManager._derive_device_id`` under the ``host_topic``
+    strategy so the documented "every metric arrives with
+    ``host=localhost`` but the topic tree still tells hosts apart"
+    scenario actually works -- the feature cannot solve a collision on
+    the host tag if it then immediately trusts that same tag.
+    """
+    if not isinstance(value, str):
+        return True
+    return value.strip().lower() in _DEGENERATE_HOST_TAGS
 
 
 def _slugify_device(value: str) -> str:
@@ -754,11 +793,14 @@ class DeviceManager:
 
         - ``"host"`` (default, pre-10 behaviour): use the host tag, falling
           back to the first non-wildcard topic segment.
-        - ``"host_topic"``: use the host tag when present, otherwise append
-          the second-level topic segment to the first segment. Useful when
-          a single Telegraf agent is misconfigured and every metric
-          arrives with ``host=localhost`` but the topic tree still tells
-          hosts apart.
+        - ``"host_topic"``: prefer the host tag, but treat a *degenerate*
+          host tag (``localhost``, ``127.0.0.1``, ``0.0.0.0``, ``::1``, or
+          the literal string ``host``) the same as a missing one and
+          append the second-level topic segment to the first. This is
+          the exact case the option was built for: a single Telegraf
+          agent that inherits the local-only ``host=localhost`` default
+          but the topic tree still tells hosts apart
+          (``telegraf/server01/cpu`` vs ``telegraf/server02/cpu``).
         - ``"topic_only"``: always use the topic tree. Less stable across
           re-arranges; only useful when the broker-side topic structure
           is the authoritative device anchor.
@@ -767,10 +809,16 @@ class DeviceManager:
         topic_root, topic_sub = self._split_topic(topic)
         if self._device_id_strategy == "topic_only":
             return _slugify_device(topic_root) if topic_root else self._default_device_id
+        # ``host_topic`` is a strategy the user picks precisely because the
+        # host tag is unreliable on their broker. A *degenerate* host tag
+        # (``localhost`` etc.) is effectively the same as no host tag at
+        # all -- two distinct real hosts both publishing ``host=localhost``
+        # would otherwise collapse onto a single device. Treat it as
+        # missing so the second-level topic segment gets to do its job.
+        if self._device_id_strategy == "host_topic" and topic_sub and _is_degenerate_host(host):
+            return _slugify_device(f"{topic_root}_{topic_sub}")
         if isinstance(host, str) and host:
             return _slugify_device(host)
-        if self._device_id_strategy == "host_topic" and topic_sub:
-            return _slugify_device(f"{topic_root}_{topic_sub}")
         return _slugify_device(topic_root) if topic_root else self._default_device_id
 
     def _derive_device_name(self, topic: str, descriptor: MetricDescriptor) -> str:

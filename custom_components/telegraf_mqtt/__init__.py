@@ -320,6 +320,15 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
     )
     _schedule_expiry_check(hass, entry)
+    # Re-run the runtime-detected device-id Repairs checks immediately:
+    # a structural option change (exclude_patterns, device_id_strategy,
+    # ...) can create or resolve a collision/conflict, and the user
+    # should see that without waiting for the next periodic tick. Both
+    # checks are idempotent create-or-delete calls and self-guard when
+    # the issue registry is unavailable. The ``device_id_strategy``
+    # reload path re-runs them after the rebuild via ``async_setup_entry``.
+    check_device_id_collision(hass, entry)
+    check_device_id_conflict(hass, entry)
 
 
 async def _async_options_maybe_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -367,7 +376,7 @@ def _coerce_int_option(
         return default, True
     try:
         value = int(raw)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         return default, True
     if value < minimum:
         return default, True

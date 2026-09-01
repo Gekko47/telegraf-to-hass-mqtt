@@ -34,7 +34,11 @@ CONF_FIELD_OVERRIDE_STATE_CLASS = "state_class"
 CONF_FIELD_OVERRIDE_ENTITY_CATEGORY = "entity_category"
 # Phase 10: how the integration derives a device_id from incoming messages.
 # "host" -- use the host tag (default; matches pre-10 behaviour).
-# "host_topic" -- if host is missing, append the second-level topic root.
+# "host_topic" -- prefer the host tag, but treat a *degenerate* host
+#   (localhost, 127.0.0.1, 0.0.0.0, ::1, the literal "host") as missing
+#   and append the second-level topic root. Solves the case where two
+#   real hosts both publish ``host=localhost`` and the topic tree is
+#   the only per-machine signal. See ``registry._derive_device_id``.
 # "topic_only" -- always use the topic tree; less stable across re-arranges.
 CONF_DEVICE_ID_STRATEGY = "device_id_strategy"
 DEFAULT_DEVICE_ID_STRATEGY = "host"

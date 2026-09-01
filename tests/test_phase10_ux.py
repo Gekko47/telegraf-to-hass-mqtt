@@ -231,6 +231,70 @@ def test_registry_apply_options_propagates_category_overrides() -> None:
     assert registry._category_overrides == {"k": "config"}
 
 
+# --- Phase 10: category_overrides accept globs (parity with exclude_patterns)
+
+
+def test_category_override_matcher_prefers_exact_over_glob() -> None:
+    from custom_components.telegraf_mqtt.naming import match_category_override_key
+
+    overrides = {"cpu_x": None, "cpu_*": "config"}
+    assert match_category_override_key("cpu_x", overrides) == "cpu_x"
+
+
+def test_category_override_matcher_first_glob_in_insertion_order_wins() -> None:
+    from custom_components.telegraf_mqtt.naming import match_category_override_key
+
+    # Non-overlapping globs: "cpu_usage*" cannot match "cpu_used_percent".
+    overrides = {"cpu_usage*": "config", "cpu_*": "diagnostic"}
+    assert match_category_override_key("cpu_usage_idle", overrides) == "cpu_usage*"
+    assert match_category_override_key("cpu_used_percent", overrides) == "cpu_*"
+
+
+def test_category_override_matcher_no_match_returns_none() -> None:
+    from custom_components.telegraf_mqtt.naming import match_category_override_key
+
+    assert match_category_override_key("mem_used", {"cpu_*": "config"}) is None
+    # A key without glob characters stays exact-only: it can never
+    # pattern-match a different unique_key.
+    assert match_category_override_key("mem_used", {"mem": "config"}) is None
+
+
+def test_apply_category_override_glob_pattern_applies() -> None:
+    assert apply_category_override("cpu", "x", "cpu_x", {"cpu_*": "diagnostic"}) == "diagnostic"
+    # A glob whose value clears the category behaves like the exact form.
+    assert apply_category_override("cpu", "x", "cpu_x", {"cpu_*": None}) is None
+
+
+def test_apply_category_override_glob_no_match_keeps_heuristic() -> None:
+    # ("mem", "used_percent") resolves to no category; a non-matching
+    # glob must not change that.
+    assert apply_category_override("mem", "used_percent", "mem_used_percent", {"cpu_*": "config"}) is None
+
+
+def test_registry_glob_category_override_resolves_live() -> None:
+    """A glob category override re-resolves existing states and emits a
+    write when the resolved category actually changes."""
+    registry = _registry()
+    registry.update(_descriptor("x", 1.0))
+    writes: list[tuple[str, bool]] = []
+    registry.apply_options(
+        category_overrides={"cpu_*": "diagnostic"},
+        on_write=lambda key, available, value: writes.append((key, available)),
+    )
+    assert writes == [("cpu_x", True)]
+    assert registry.get("cpu_x").descriptor.entity_category == "diagnostic"
+
+
+def test_registry_exact_category_override_still_beats_glob_live() -> None:
+    registry = _registry()
+    registry.update(_descriptor("x", 1.0))
+    registry.apply_options(category_overrides={"cpu_x": None, "cpu_*": "diagnostic"})
+    # Exact key clears the category; the glob never gets a say. The
+    # resolved value equals the descriptor's baseline category, so no
+    # re-write is emitted either.
+    assert registry.get("cpu_x").descriptor.entity_category is None
+
+
 def test_registry_apply_options_propagates_device_id_strategy() -> None:
     registry = _registry()
     registry.apply_options(device_id_strategy="host_topic")
@@ -541,6 +605,70 @@ def test_device_id_strategy_host_topic_prefers_host_tag() -> None:
     devices = list(manager.devices.keys())
     assert len(devices) == 1
     assert devices[0].startswith("real_host")
+
+
+def test_device_id_strategy_host_topic_disambiguates_degenerate_host_via_topic() -> None:
+    """The bug report's flagship scenario: two distinct real hosts both
+    publishing ``host=localhost`` must end up on different devices when
+    ``device_id_strategy="host_topic"`` is selected.
+
+    The integration cannot trust the host tag under this strategy -- that
+    is precisely why the user picked it. Each payload's second-level
+    topic segment is the only per-machine signal the broker carries, so
+    the device id has to incorporate it.
+    """
+    manager = _manager(device_id_strategy="host_topic")
+    payload = b'{"name":"cpu","tags":{"host":"localhost"},"fields":{"usage_idle":12.3},"timestamp":1721664000}'
+    manager.process_message("telegraf/server01/cpu", payload)
+    manager.process_message("telegraf/server02/cpu", payload)
+    devices = sorted(manager.devices.keys())
+    assert devices == ["telegraf_server01", "telegraf_server02"]
+
+
+def test_device_id_strategy_host_topic_degenerate_host_match_is_case_insensitive() -> None:
+    """``LOCALHOST`` and ``127.0.0.1`` are degenerate too; comparison must
+    be lowercased so a Telegraf agent publishing ``host=LOCALHOST`` does
+    not silently re-introduce the collision the option was meant to fix.
+    """
+    manager = _manager(device_id_strategy="host_topic")
+    payload_upper = b'{"name":"cpu","tags":{"host":"LOCALHOST"},"fields":{"usage_idle":1.0},"timestamp":1}'
+    payload_loopback = b'{"name":"cpu","tags":{"host":"127.0.0.1"},"fields":{"usage_idle":2.0},"timestamp":2}'
+    manager.process_message("telegraf/server03/cpu", payload_upper)
+    manager.process_message("telegraf/server04/cpu", payload_loopback)
+    devices = sorted(manager.devices.keys())
+    assert devices == ["telegraf_server03", "telegraf_server04"]
+
+
+def test_device_id_strategy_host_topic_treats_non_string_host_as_degenerate() -> None:
+    """A non-string host tag is treated as degenerate under ``host_topic``.
+
+    The bundled parsers stringify every tag, but ``DeviceManager`` is a
+    public surface that accepts descriptors from any parser: a malformed
+    host tag (e.g. a numeric value) must be treated as untrustworthy --
+    the same as ``localhost`` -- so the topic tree still anchors the
+    device id instead of the manager stringifying and trusting it.
+    """
+    manager = _manager(device_id_strategy="host_topic")
+    descriptor = replace(
+        _descriptor("usage_idle", 1.0),
+        tags=MappingProxyType({"host": 5}),
+    )
+    assert manager._derive_device_id("telegraf/server05/cpu", descriptor) == "telegraf_server05"
+
+
+def test_device_id_strategy_default_host_still_uses_localhost_when_topic_irrelevant() -> None:
+    """Regression guard: changing the ``host_topic`` fallback must not
+    touch the default ``"host"`` strategy. A user who has not opted in
+    to ``host_topic`` continues to trust the host tag verbatim, even
+    when that tag is the well-known degenerate ``localhost`` -- they
+    get a single device either way.
+    """
+    manager = _manager()  # default strategy is "host"
+    payload = b'{"name":"cpu","tags":{"host":"localhost"},"fields":{"usage_idle":1.0},"timestamp":1}'
+    manager.process_message("telegraf/server01/cpu", payload)
+    manager.process_message("telegraf/server02/cpu", payload)
+    devices = list(manager.devices.keys())
+    assert devices == ["localhost"]
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1117,58 @@ def test_extract_host_handles_bytes_with_escape() -> None:
     # never contains a backslash followed by a quote.
     result = _extract_host(b'{"host":"a\\"b"}')
     assert result == "a\\"
+
+
+def test_extract_host_anchors_on_key_not_substring() -> None:
+    """Trip wire for the audit's ``_extract_host`` substring bug.
+
+    The previous hand-rolled scanner searched for the bare string
+    ``"host"`` and took the first match -- which is wrong on any
+    payload where ``"host"`` appears earlier as a substring. The
+    fixed implementation anchors on the JSON *key* position
+    (``"host":``), so a sibling tag named ``"hostname"`` (whose
+    value would otherwise be returned instead of the real host tag)
+    or a string field whose value happens to contain the literal
+    ``"host":`` sequence does not get returned.
+
+    Each case below would return the *wrong* value under the old
+    scanner. They all return the right value under the new one.
+
+    Scope note: a payload where a *nested object* carries a
+    ``"host"`` key before the real one, or where the first
+    ``"host"`` key is followed by a non-string value while a later
+    one is the real string host tag, is intentionally not asserted
+    here. The audit's own suggested anchor (``^{.*"host"\\s*:``) is
+    no stronger than the regex below on those adversarial shapes,
+    and Telegraf's actual wire format never produces them. The
+    substring cases (1, 2 below) are the realistic risks this test
+    pins.
+    """
+    from custom_components.telegraf_mqtt.snoop import _extract_host
+
+    # 1. The audit's flagship failure mode: a sibling tag whose name
+    # starts with ``"host"`` (``"hostname"``) precedes the real
+    # ``"host"`` tag. The old scanner would return ``"x"`` (the
+    # value of ``hostname``); the anchored scanner skips over the
+    # substring and finds the real key.
+    assert _extract_host(b'{"tags":{"hostname":"x","host":"real"}}') == "real"
+
+    # 2. A string value containing the literal ``"host"`` (without the
+    # trailing ``":`` that would make it a key) must not be treated
+    # as the key position. The old scanner would land inside the
+    # string and walk into the value. The anchored scanner requires
+    # the substring to be followed by ``:`` after the closing quote,
+    # which the string value does not provide.
+    assert _extract_host(b'{"path":"/some/host/file","host":"real"}}') == "real"
+
+    # 3. The actual Telegraf payload shape must still work -- the
+    # anchored search is a strict improvement, not a regression.
+    assert _extract_host(b'{"name":"cpu","tags":{"host":"alpha","dc":"east"},"fields":{}}') == "alpha"
+
+    # 4. The no-host-tag case still returns ``""``: when the only
+    # ``"host"``-prefixed token is a sibling tag, the anchored
+    # search finds nothing.
+    assert _extract_host(b'{"tags":{"hostname":"only"}}') == ""
 
 
 # ---------------------------------------------------------------------------

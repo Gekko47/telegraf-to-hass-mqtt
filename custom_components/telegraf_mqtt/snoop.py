@@ -16,6 +16,7 @@ Two operating modes are supported:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
@@ -219,12 +220,22 @@ class SnoopListener:
 
 
 def _extract_host(payload: str | bytes | bytearray) -> str:
-    """Extract the ``host`` tag from a JSON payload without a full parse.
+    r"""Extract the ``host`` tag from a JSON payload without a full parse.
 
     The snoop listener is invoked on every MQTT message, including
     ones the parser would reject. We want to record the host even
     when the payload is malformed so a corrupted payload doesn't
     raise and break the snoop.
+
+    The pattern is anchored to a *key*: ``"host"\s*:``. Searching
+    for the bare string ``"host"`` would grab the wrong value on
+    any payload where ``"host"`` appears earlier as a substring --
+    e.g. a sibling tag named ``"hostname"`` (the value of which
+    would be returned instead of the real host tag) or a string
+    field whose value happens to contain the literal ``"host":``
+    sequence. The regex anchor makes sure we only match the
+    JSON-key position, which is what Telegraf's actual wire format
+    uses (``{"tags": {"host": "..."}}``).
     """
     if isinstance(payload, (bytes, bytearray)):
         # ``errors="replace"`` never raises for any byte sequence, so a
@@ -235,24 +246,43 @@ def _extract_host(payload: str | bytes | bytearray) -> str:
         text = payload
     else:
         return ""
-    needle = '"host"'
-    idx = text.find(needle)
-    if idx == -1:
+    # Two-stage: first anchor on the JSON *key* position (``"host":``),
+    # then walk the value the way the previous hand-rolled scanner did.
+    # The first stage is the bug fix -- the bare-string ``text.find('"host"')``
+    # would grab the wrong value on payloads where ``"host"`` appears
+    # earlier as a substring (e.g. ``"hostname"`` or a string value
+    # containing the literal ``"host":``). The second stage preserves
+    # the original best-effort semantics: a string value is captured
+    # verbatim up to the next ``"``; a non-string value, a missing
+    # value, or an unclosed quote degrade to ``""`` or the partial
+    # value, exactly as before.
+    key_match = _HOST_KEY_RE.search(text)
+    if key_match is None:
         return ""
-    rest = text[idx + len(needle) :]
-    colon = rest.find(":")
-    if colon == -1:
-        return ""
-    value_start = colon + 1
-    while value_start < len(rest) and rest[value_start] in " \t":
+    value_start = key_match.end()
+    # Skip JSON whitespace between the colon and the value.
+    while value_start < len(text) and text[value_start] in " \t":
         value_start += 1
-    if value_start >= len(rest) or rest[value_start] != '"':
+    if value_start >= len(text) or text[value_start] != '"':
         return ""
     value_start += 1
-    value_end = value_start
-    while value_end < len(rest):
-        ch = rest[value_end]
-        if ch == '"':
-            break
-        value_end += 1
-    return rest[value_start:value_end]
+    value_end = text.find('"', value_start)
+    if value_end == -1:
+        # Unclosed quote: return everything to end-of-payload. Matches
+        # the previous scanner's behaviour; the snoop is best-effort.
+        return text[value_start:]
+    return text[value_start:value_end]
+
+
+# Anchored once at import time: the ``host`` *key* (followed by ``:``,
+# with optional JSON whitespace). The pattern intentionally rejects:
+#   * ``"hostname": ...`` -- the bare ``"host"`` substring inside
+#     ``"hostname"`` is not followed by ``:`` on the next characters,
+#   * ``"path": "/some/host/file"`` -- the literal ``"host":`` inside
+#     the string value is not the key position,
+# so the first match in any well-formed Telegraf payload is the
+# real ``host`` tag. The value is *not* part of the regex on purpose:
+# the previous hand-rolled scanner had bespoke rules for unclosed
+# quotes and non-string values, and keeping that logic outside the
+# regex preserves the existing observable behaviour.
+_HOST_KEY_RE = re.compile(r'"host"\s*:')

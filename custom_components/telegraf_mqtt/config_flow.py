@@ -211,10 +211,7 @@ def _pick_topics_schema(prefixes: list[str], pre_selected: list[str]) -> vol.Sch
     ``pre_selected`` is the subset of those prefixes that look
     Telegraf-shaped -- the user can deselect or add custom values.
     """
-    options = [
-        selector.SelectOptionDict(value=p, label=p)
-        for p in prefixes[:_MAX_PICK_LIST_OPTIONS]
-    ]
+    options = [selector.SelectOptionDict(value=p, label=p) for p in prefixes[:_MAX_PICK_LIST_OPTIONS]]
     return vol.Schema(
         {
             vol.Optional(
@@ -394,9 +391,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # future-added mode doesn't strand the user.
         return await self.async_step_manual_topic()
 
-    async def async_step_manual_topic(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_manual_topic(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show the topic + device-metadata form (the original flow)."""
         if user_input is not None:
             errors = self._validate(user_input)
@@ -447,9 +442,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
     # Discover path
     # ------------------------------------------------------------------
-    async def async_step_scan_settings(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_scan_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Collect the probe topic + scan window before the scan starts."""
         if user_input is not None:
             errors = self._validate_scan_settings(user_input)
@@ -468,9 +461,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=_scan_settings_schema(),
         )
 
-    async def async_step_scan_running(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_scan_running(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Run the snoop for the configured window, then move to the picker.
 
         The snoop installs a transient broker subscription on the user's
@@ -526,9 +517,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return await self.async_step_pick_topics()
 
-    async def async_step_pick_topics(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_pick_topics(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Present the roll-up of seen topics and let the user pick."""
         prefixes = _roll_up_topics(self._scan_seen_topics)
         pre_selected = [p for p in prefixes if _looks_telegraf_shaped(p)]
@@ -688,13 +677,10 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         duration = user_input.get(CONF_SCAN_DURATION_SECONDS, 0)
         try:
             duration_int = int(duration)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # fmt: skip
             errors[CONF_SCAN_DURATION_SECONDS] = "invalid_duration"
             return errors
-        if (
-            duration_int < MIN_SCAN_DURATION_SECONDS
-            or duration_int > MAX_SCAN_DURATION_SECONDS
-        ):
+        if duration_int < MIN_SCAN_DURATION_SECONDS or duration_int > MAX_SCAN_DURATION_SECONDS:
             errors[CONF_SCAN_DURATION_SECONDS] = "invalid_duration"
         return errors
 

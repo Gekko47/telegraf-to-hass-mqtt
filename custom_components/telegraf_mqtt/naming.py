@@ -9,13 +9,16 @@ a translation key.
 
 Phase 10: per-entity category overrides. The options flow can store
 ``{unique_key: "config" | "diagnostic" | None}`` to flip the auto-derived
-category for one specific metric. The override is consulted by
-``apply_category_override`` after the heuristic resolves.
+category for one specific metric. Keys may be exact ``unique_key``
+strings or glob patterns (e.g. ``mem_*``) matched with ``fnmatchcase``;
+the override is consulted by ``apply_category_override`` after the
+heuristic resolves.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from fnmatch import fnmatchcase
 
 from .heuristics import (
     ENTITY_CATEGORY_DIAGNOSTIC,
@@ -142,6 +145,27 @@ def resolve_entity_category(measurement: str, field: str) -> str | None:
     return None
 
 
+def match_category_override_key(
+    unique_key: str,
+    overrides: Mapping[str, str | None],
+) -> str | None:
+    """Return the override key that applies to ``unique_key``, or ``None``.
+
+    An exact key always wins over a glob. Glob keys (keys containing
+    ``*``, ``?`` or ``[``) are evaluated in insertion order and the
+    first match is used. Matching is case-sensitive via
+    ``fnmatchcase`` so behavior is identical on every host OS (plain
+    ``fnmatch`` would fold case on Windows and make option semantics
+    platform-dependent).
+    """
+    if unique_key in overrides:
+        return unique_key
+    for key in overrides:
+        if any(char in key for char in "*?[") and fnmatchcase(unique_key, key):
+            return key
+    return None
+
+
 def apply_category_override(
     measurement: str,
     field: str,
@@ -151,7 +175,11 @@ def apply_category_override(
     """Layer a per-entity category override on top of the heuristic.
 
     ``overrides`` is a ``{unique_key: category}`` map stored in
-    ``entry.options[CATEGORY_OVERRIDES]``. Values accepted:
+    ``entry.options[CATEGORY_OVERRIDES]``. Keys may be exact
+    ``unique_key`` strings or glob patterns (e.g. ``mem_*``) matched
+    against the metric's unique key via ``match_category_override_key``
+    (exact key wins, then the first matching glob in insertion order).
+    Values accepted:
 
     - ``"config"`` -> forced to the config category.
     - ``"diagnostic"`` -> forced to diagnostic.
@@ -166,9 +194,10 @@ def apply_category_override(
     heuristic = resolve_entity_category(measurement, field)
     if not overrides:
         return heuristic
-    if unique_key not in overrides:
+    matched = match_category_override_key(unique_key, overrides)
+    if matched is None:
         return heuristic
-    raw = overrides[unique_key]
+    raw = overrides[matched]
     if raw in (None, ENTITY_CATEGORY_NONE):
         return None
     if raw == ENTITY_CATEGORY_CONFIG:

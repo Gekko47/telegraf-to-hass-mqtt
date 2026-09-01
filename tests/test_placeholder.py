@@ -152,6 +152,9 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
     def async_dispatcher_connect(hass, signal, target):
         return lambda: None
 
+    def async_dispatcher_send(hass, signal, *args):
+        return None
+
     def add_entities(entities) -> None:
         return None
 
@@ -164,6 +167,7 @@ def _install_binary_sensor_homeassistant_stubs(monkeypatch) -> None:
     core.callback = callback
     device_registry.DeviceInfo = DeviceInfo
     dispatcher.async_dispatcher_connect = async_dispatcher_connect
+    dispatcher.async_dispatcher_send = async_dispatcher_send
     entity_platform.AddEntitiesCallback = add_entities
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components)
@@ -254,6 +258,53 @@ def test_hacs_packaging_metadata_is_release_ready() -> None:
     assert hacs["homeassistant"] == "2026.6.0"
     assert hacs["content_in_root"] is False
     assert manifest["version"] != "0.0.0"
+
+
+def test_pyproject_version_matches_manifest() -> None:
+    """``pyproject.toml`` ``[project] version`` must match ``manifest.json``.
+
+    ``manifest.json`` is the canonical version surface (HACS and HA read
+    it; CI's ``hassfest`` validates it). ``pyproject.toml`` is the
+    metadata surface for tooling that runs ``pip show`` or imports the
+    package directly -- it has to agree, or the user sees a stale
+    version on one surface and a fresh one on another.
+
+    Trip wire for the bug the original review flagged: prior to this
+    test, ``pyproject.toml`` was pinned to ``0.1.0`` while
+    ``manifest.json`` had already moved to ``1.3.0`` -- a three-minor
+    drift that eroded review confidence and would confuse anyone
+    running ``pip show``. Bumping one without the other now fails the
+    test gate.
+    """
+    import tomllib  # Python 3.11+ stdlib; project floor is 3.14.
+
+    pyproject_path = Path("pyproject.toml")
+    manifest_path = Path("custom_components/telegraf_mqtt/manifest.json")
+
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    project_table = pyproject.get("project")
+    assert isinstance(project_table, dict), "pyproject.toml is missing a [project] table"
+    assert "version" in project_table, "pyproject.toml [project] must declare a static version"
+    assert not project_table.get("dynamic", []), (
+        "pyproject.toml [project].dynamic must not include 'version' -- manifest.json is the source of truth"
+    )
+
+    pyproject_version = project_table["version"]
+    manifest_version = manifest["version"]
+
+    # Both should be non-empty, parseable as a SemVer-ish string, and
+    # match exactly. We deliberately do not call ``packaging.Version``
+    # because adding a runtime dependency for a single test is worse
+    # than a plain string comparison -- the format is enforced at
+    # release time by ``hassfest``, not here.
+    assert pyproject_version, "pyproject.toml version is empty"
+    assert manifest_version, "manifest.json version is empty"
+    assert pyproject_version == manifest_version, (
+        f"pyproject.toml version {pyproject_version!r} does not match "
+        f"manifest.json version {manifest_version!r}; bump both in the same commit"
+    )
 
 
 def test_readme_documents_install_and_configuration() -> None:

@@ -15,6 +15,7 @@ from custom_components.telegraf_mqtt.const import (
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
     CONF_TOPIC_PATTERN,
+    DEFAULT_DEVICE_ID_STRATEGY,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_REMOVE_METRIC,
 )
@@ -201,6 +202,37 @@ def test_options_update_applies_live_without_reload(monkeypatch) -> None:
     )
 
 
+def test_options_update_reruns_device_id_repairs_immediately(monkeypatch) -> None:
+    """A live options update re-runs the device-id collision/conflict
+    Repairs checks right away instead of waiting for the next periodic
+    tick (or, for a ``device_id_strategy`` change, the post-reload setup)."""
+    _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 5})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        integration,
+        "check_device_id_collision",
+        lambda hass_, entry_: calls.append("collision"),
+    )
+    monkeypatch.setattr(
+        integration,
+        "check_device_id_conflict",
+        lambda hass_, entry_: calls.append("conflict"),
+    )
+
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    # Setup itself runs both checks once.
+    assert calls == ["collision", "conflict"]
+
+    entry.options = {CONF_EXPIRE_AFTER: 7}
+    asyncio.run(entry._fire_update_listeners(hass))
+
+    # The live options-update listener ran both checks again, in order,
+    # before the (no-op) strategy reload listener.
+    assert calls == ["collision", "conflict", "collision", "conflict"]
+
+
 def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     monkeypatch,
 ) -> None:
@@ -308,3 +340,63 @@ def test_scheduled_cleanup_dispatches_update_for_always_metric(monkeypatch) -> N
         (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
         (SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
     ]
+
+
+def test_setup_loads_pre_phase_10_entry_without_crashing(monkeypatch) -> None:
+    """A config entry created before Phase 10 -- whose options dict has
+    none of the Phase-10 additions -- must still set up cleanly.
+
+    Trip wire for the audit's "migration safety" item: a user who
+    installed the integration pre-Phase-10 keeps their existing
+    ``.storage/`` blob across the upgrade. ``async_setup_entry`` runs
+    through ``_normalize_options`` which falls back to documented
+    defaults via the ``_coerce_*`` helpers -- this test pins the
+    contract so a future refactor that breaks the default-fallback path
+    (e.g. a ``raw_options[CONF_DEVICE_ID_STRATEGY]`` that crashes when
+    the key is absent) fails CI instead of crashing the user's entry
+    in production.
+
+    Three Phase-10 options are explicitly absent from the options dict
+    below: ``device_id_strategy``, ``category_overrides``, and
+    ``auto_discover``. The setup must:
+      1. Return ``True`` (no exception, no entry failure).
+      2. Build a manager that carries the documented defaults for the
+         missing fields -- the user should not silently get a strategy
+         flip, a category override, or a snoop listener they never
+         opted into.
+      3. Fire no dispatcher signals (entity-churn guard: setup must
+         not pretend a brand-new metric appeared just because the
+         options dict was migrated).
+    """
+    _fake_mqtt, dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    # Note: this is the exact options shape a user who last opened the
+    # options flow in v1.1.x would have -- the three Phase-10 keys
+    # below are *deliberately* missing to simulate a pre-10 entry.
+    pre_phase_10_options = {
+        CONF_EXPIRE_AFTER: 7,
+        CONF_EXCLUDE_PATTERNS: ["mem_*"],
+        CONF_FIELD_OVERRIDES: {"used_percent": {"native_unit": "%"}},
+        CONF_CLEANUP_DELAY: 30,
+        CONF_DELETE_DELAY: 60,
+    }
+    entry = FakeConfigEntry(options=pre_phase_10_options)
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+
+    # Default-fallback contract: the manager must carry the documented
+    # Phase-10 defaults, not crash and not pick up an arbitrary value.
+    manager = entry.runtime_data.manager
+    assert manager is not None
+    assert manager._device_id_strategy == DEFAULT_DEVICE_ID_STRATEGY
+    assert manager._category_overrides == {}
+
+    # Entity-churn guard: setup must not pretend anything changed.
+    # ``_patch_runtime`` collects every ``async_dispatcher_send`` call;
+    # an empty list means no spurious new-metric / new-device signal
+    # fired as a side effect of the migration.
+    assert dispatched == []
+
+    # Snoop listener is opt-in via ``auto_discover``; a pre-10 entry
+    # never had that key, so the teardown handle must stay ``None``.
+    assert entry.runtime_data.unsubscribe_snoop is None

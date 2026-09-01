@@ -1,11 +1,30 @@
 [project]
 name = "telegraf-to-hass-mqtt"
-version = "0.1.0"
+# ``manifest.json`` is the canonical version surface (HACS and HA read it,
+# CI's ``hassfest`` validates it). The static value here is locked to it
+# by ``tests/test_placeholder.py::test_pyproject_version_matches_manifest``
+# so a release that bumps one without the other fails the test gate.
+version = "1.3.0"
 description = "Home Assistant custom integration: one device per Telegraf-reported PC"
+# Repo-wide Python floor -- HA 2026.6.x requires CPython >=3.14 (its
+# ``homeassistant`` Requires-Python). Every tool surface declares the same
+# floor: CI's pytest.yml pins python-version 3.14, mypy sets
+# python_version = "3.14", ruff pins target-version = "py314".
 requires-python = ">=3.14"
 dependencies = []  # SPEC.md non-goals: nothing beyond Home Assistant core
 
 [tool.ruff]
+# Pinned explicitly rather than inferred from ``requires-python`` so the
+# lint target is self-documenting. Note: ruff's parser is version-aware, so
+# at this target it *accepts* 3.14-only grammar (e.g. PEP 758's
+# unparenthesized ``except A, B:``) by design -- and ruff format at this
+# target actively *strips* the parentheses from ``except (A, B):``. The
+# package keeps the parenthesized, portable form (otherwise a hard
+# SyntaxError on CPython <= 3.13), so every such clause carries a bare
+# ``# fmt: skip`` directive: those parentheses are load-bearing. The
+# grammar-compatibility tripwire for older interpreters lives in
+# tests/test_syntax_compatibility.py (ast feature_version).
+target-version = "py314"
 line-length = 120
 extend-exclude = [".venv"]
 

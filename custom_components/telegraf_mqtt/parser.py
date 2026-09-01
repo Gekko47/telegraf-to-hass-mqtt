@@ -149,7 +149,7 @@ class TelegrafParser:
 
         try:
             decoded = json.loads(payload)
-        except TypeError, UnicodeDecodeError, json.JSONDecodeError:
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):  # fmt: skip
             _LOGGER.debug("Invalid Telegraf JSON payload")
             self.stats.note_dropped(topic, byte_length, "invalid_json")
             return []
