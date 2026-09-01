@@ -205,23 +205,37 @@ def _scan_settings_schema() -> vol.Schema:
 
 
 def _pick_topics_schema(prefixes: list[str], pre_selected: list[str]) -> vol.Schema:
-    """Build the pick-list form for the discover-topics flow.
+    """Build the pick form for the discover-topics flow.
 
     ``prefixes`` is the roll-up of every 2nd-level prefix the scan saw.
     ``pre_selected`` is the subset of those prefixes that look
-    Telegraf-shaped -- the user can deselect or add custom values.
+    Telegraf-shaped; the first of them becomes the form's default.
+
+    The runtime subscription supports exactly one pattern per entry
+    (``mqtt.async_subscribe`` is called once with ``topic_pattern``),
+    so the picker is single-select: the UI matches what the entry will
+    actually do instead of inviting extra picks that would be silently
+    discarded. ``custom_value=True`` still lets the user hand-type a
+    pattern the scan did not surface. With no Telegraf-shaped prefix
+    the field has no default and an untouched submit lands on the
+    step's friendly ``no_topics_selected`` error.
     """
     options = [selector.SelectOptionDict(value=p, label=p) for p in prefixes[:_MAX_PICK_LIST_OPTIONS]]
+    # Voluptuous validates defaults, so a ``default=None`` sentinel is
+    # not an option against a strict selector: when there is nothing
+    # to pre-select, leave the key without a default instead.
+    field: vol.Marker
+    if pre_selected:
+        field = vol.Optional(CONF_TOPIC_PATTERN, default=pre_selected[0])
+    else:
+        field = vol.Optional(CONF_TOPIC_PATTERN)
     return vol.Schema(
         {
-            vol.Optional(
-                CONF_TOPIC_PATTERN,
-                default=pre_selected,
-            ): selector.SelectSelector(
+            field: selector.SelectSelector(
                 selector.SelectSelectorConfig(
                     options=options,
                     custom_value=True,
-                    multiple=True,
+                    multiple=False,
                     mode=selector.SelectSelectorMode.LIST,
                 )
             ),
@@ -518,34 +532,34 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_pick_topics()
 
     async def async_step_pick_topics(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Present the roll-up of seen topics and let the user pick."""
+        """Present the roll-up of seen topics and let the user pick one."""
         prefixes = _roll_up_topics(self._scan_seen_topics)
         pre_selected = [p for p in prefixes if _looks_telegraf_shaped(p)]
 
         if user_input is not None:
-            picks = user_input.get(CONF_TOPIC_PATTERN, []) or []
-            if not picks:
+            # The picker is single-select: the runtime subscription
+            # supports exactly one pattern per entry, so the
+            # submission is a single string and nothing is silently
+            # discarded. A user who wants another topic root adds
+            # another entry (re-running the scan or typing the
+            # pattern manually).
+            pattern = user_input.get(CONF_TOPIC_PATTERN)
+            if not pattern:
                 return self.async_show_form(
                     step_id="pick_topics",
                     data_schema=_pick_topics_schema(prefixes, pre_selected),
                     errors={CONF_TOPIC_PATTERN: "no_topics_selected"},
                 )
 
-            # Each pick must be a syntactically valid subscription.
-            invalid = [p for p in picks if not _valid_subscription_topic(p)]
-            if invalid:
+            # The pick must be a syntactically valid subscription.
+            if not _valid_subscription_topic(pattern):
                 return self.async_show_form(
                     step_id="pick_topics",
                     data_schema=_pick_topics_schema(prefixes, pre_selected),
                     errors={CONF_TOPIC_PATTERN: "invalid_topic"},
                 )
 
-            # The picker is multi-select but the current MQTT
-            # subscription only supports a single pattern. Pin to the
-            # first pick -- the common case is a single Telegraf
-            # deployment per broker, and the user can adjust via
-            # reconfigure if they need a custom pattern.
-            chosen = picks[0]
+            chosen = pattern
             device_name = _default_device_name(chosen)
             await self.async_set_unique_id(chosen)
             self._abort_if_unique_id_configured()

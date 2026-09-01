@@ -307,9 +307,9 @@ def test_pick_topics_invalid_pick_returns_invalid_topic_error() -> None:
     flow, forms = _make_flow_with_seen(seen)
 
     async def _run() -> None:
-        # Mix a valid pre-selected Telegraf pick with a hand-typed junk
-        # topic; only the junk should fail the validator.
-        result = await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: ["telegraf/rack1/#", "garbage/topic/#/bad"]})
+        # A hand-typed junk topic must fail the validator so the typo
+        # cannot silently create an entry.
+        result = await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: "garbage/topic/#/bad"})
         assert result["type"] == "form"
         assert result["step_id"] == "pick_topics"
         assert result["errors"] == {CONF_TOPIC_PATTERN: "invalid_topic"}
@@ -321,36 +321,42 @@ def test_pick_topics_invalid_pick_returns_invalid_topic_error() -> None:
 
 
 def test_pick_topics_no_picks_returns_no_topics_selected_error() -> None:
-    """Submitting the pick form with an empty list surfaces
-    ``no_topics_selected`` and re-shows the form. The HA-harness
-    config flow is the canonical pin; this harness-free test is the
-    trip wire against a refactor that silently accepts an empty
-    pick list.
+    """Submitting the pick form without a pick -- the key omitted
+    entirely (an untouched optional select) or an explicitly empty
+    value -- surfaces ``no_topics_selected`` and re-shows the form.
+    The HA-harness config flow is the canonical pin; this harness-free
+    test is the trip wire against a refactor that silently accepts an
+    empty pick.
     """
     seen = frozenset({"telegraf/rack1/cpu"})
     flow, forms = _make_flow_with_seen(seen)
 
     async def _run() -> None:
-        result = await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: []})
+        result = await flow.async_step_pick_topics({})
         assert result["type"] == "form"
         assert result["step_id"] == "pick_topics"
         assert result["errors"] == {CONF_TOPIC_PATTERN: "no_topics_selected"}
 
+        result = await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: ""})
+        assert result["errors"] == {CONF_TOPIC_PATTERN: "no_topics_selected"}
+
     asyncio.run(_run())
-    assert len(forms) == 1
+    assert len(forms) == 2
+    assert all(form["step_id"] == "pick_topics" for form in forms)
     assert forms[0]["errors"] == {CONF_TOPIC_PATTERN: "no_topics_selected"}
+    assert forms[1]["errors"] == {CONF_TOPIC_PATTERN: "no_topics_selected"}
 
 
 def test_pick_topics_schema_pre_selects_only_telegraf_shaped_prefixes() -> None:
-    """The pick form's ``default=`` is the Telegraf-shaped subset, not
-    the full prefix list.
+    """The pick form's ``default=`` is the first Telegraf-shaped
+    prefix, never a non-Telegraf one.
 
     Pin the wiring between ``_looks_telegraf_shaped`` and
     ``_pick_topics_schema`` so a refactor that accidentally swaps
     ``pre_selected`` for ``prefixes`` (or drops the pre-selection
     altogether) is caught here: the user would otherwise be greeted
-    by a fully-selected pick list, including HA-internal topics
-    like ``homeassistant/sensor/#``.
+    by a pre-selected HA-internal topic like
+    ``homeassistant/sensor/#``.
     """
     prefixes = [
         "homeassistant/sensor/#",
@@ -361,14 +367,9 @@ def test_pick_topics_schema_pre_selects_only_telegraf_shaped_prefixes() -> None:
     # ``async_step_pick_topics`` builds the pre-selected list as
     # ``[p for p in prefixes if _looks_telegraf_shaped(p)]``; the
     # test exercises the same wiring so a refactor that drops the
-    # pre-selection or reorders the args is caught.
+    # pre-selection or reorders the args is caught. ``_roll_up_topics``
+    # returns a sorted list, so ``pre_selected[0]`` is deterministic.
     pre_selected = [p for p in prefixes if _looks_telegraf_shaped(p)]
-    schema = _pick_topics_schema(prefixes, pre_selected)
-    # ``vol.Schema({...})`` materialises the default at construction
-    # time, so we can read it back via ``schema({})`` -- an empty
-    # input lets the default fire.
-    result = schema({})
-    assert result[CONF_TOPIC_PATTERN] == pre_selected
     # Pin the specific pre-selected list to make the test read as a
     # contract: HA-internal + non-Telegraf prefixes are excluded;
     # only the Telegraf-shaped 2nd-level ones are checked.
@@ -376,6 +377,19 @@ def test_pick_topics_schema_pre_selects_only_telegraf_shaped_prefixes() -> None:
         "telegraf/rack1/#",
         "telegraf/rack2/#",
     ]
+    schema = _pick_topics_schema(prefixes, pre_selected)
+    # ``vol.Schema({...})`` materialises the default at construction
+    # time, so we can read it back via ``schema({})`` -- an empty
+    # input lets the default fire. The single-select form defaults to
+    # the FIRST Telegraf-shaped prefix.
+    result = schema({})
+    assert result[CONF_TOPIC_PATTERN] == "telegraf/rack1/#"
+    # With nothing Telegraf-shaped, the field has no default: the key
+    # stays absent and the step owns the friendly
+    # ``no_topics_selected`` error (voluptuous validates defaults, so
+    # a ``default=None`` sentinel is not an option here).
+    empty_schema = _pick_topics_schema(prefixes, [])
+    assert CONF_TOPIC_PATTERN not in empty_schema({})
 
 
 # ---------------------------------------------------------------------------
@@ -624,9 +638,10 @@ def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatc
 
 
 def test_pick_topics_submit_creates_entry() -> None:
-    """Submitting a valid pick pins the first pick as the topic pattern
-    and creates the entry (the single-subscription limitation: extra
-    picks are ignored)."""
+    """Submitting the (single) pick creates the entry with that exact
+    pattern. The picker is single-select -- the runtime subscription
+    supports exactly one pattern per entry -- so the submission is a
+    single string and the device title derives from it."""
     flow, _forms, _hooks = _make_scan_flow()
     flow._scan_seen_topics = frozenset({"telegraf/rack1/cpu", "telegraf/rack2/cpu"})
     unique_ids: list[str] = []
@@ -637,11 +652,11 @@ def test_pick_topics_submit_creates_entry() -> None:
     flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign,assignment]
 
     async def _run() -> dict[str, Any]:
-        return await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: ["telegraf/rack2/#", "telegraf/rack1/#"]})
+        return await flow.async_step_pick_topics({CONF_TOPIC_PATTERN: "telegraf/rack2/#"})
 
     result = asyncio.run(_run())
     assert result["type"] == "create_entry"
-    # The first pick wins; the device title derives from it.
+    # The picked pattern is stored verbatim; the device title derives from it.
     assert result["data"][CONF_TOPIC_PATTERN] == "telegraf/rack2/#"
     assert result["title"] == "Telegraf"
     assert unique_ids == ["telegraf/rack2/#"]

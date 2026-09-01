@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Discover-topics pick form is single-select** (`config_flow.py`).
+  The form rendered a multi-select list (`multiple=True`) while
+  `async_step_pick_topics` silently kept only the first pick
+  (`picks[0]`) -- a user selecting several prefixes got an entry
+  covering just one of them, with no error, warning, or note. The
+  runtime subscription supports exactly one pattern per entry
+  (`mqtt.async_subscribe` is called once with the configured
+  `topic_pattern`), so the picker is now `multiple=False`, the
+  submission is a single string, and the first Telegraf-shaped prefix
+  is the form default. `strings.json` + `translations/en.json` no
+  longer invite multi-picking; users who want another topic root add
+  another entry.
+
 ## [1.3.0] - 2026-08-31
 
 Two-path config flow + snoop safety cleanup + test-scope audit closure.
