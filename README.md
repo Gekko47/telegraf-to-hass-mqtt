@@ -136,9 +136,12 @@ What does **not** trigger a state write:
 - An excluded metric (it's never inserted into the registry, so it can never
   emit a signal).
 
-Expiry is a periodic timer (interval = `min(expire_after, 30)` seconds). At each
-tick the registry flips a metric to unavailable if `now - last_updated >
-expire_after`. Recovery is immediate on the next matching message.
+Expiry is a periodic timer (interval = `max(5, min(expire_after, 30))` seconds).
+At each tick the registry flips a metric to unavailable if `now - last_updated >
+expire_after`. Recovery is immediate on the next matching message. The 5-second
+floor keeps the tick -- a synchronous full-registry scan on the event loop --
+from adding loop latency at fleet scale; staleness is still measured against
+`expire_after`, so very small values are only marked unavailable up to 5s late.
 
 ### Supported devices
 

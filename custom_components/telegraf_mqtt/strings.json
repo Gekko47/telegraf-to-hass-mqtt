@@ -94,28 +94,28 @@
   },
   "entity": {
     "sensor": {
-      "cpu_package_temperature": "CPU Package Temperature",
-      "cpu_field": "CPU {field}",
-      "memory_field": "Memory {field}",
-      "disk_root_field": "Disk Root {field}",
-      "disk_field": "Disk {field}",
-      "network_field": "{interface} {field}",
-      "sensor_field": "Sensor {field}",
-      "gpu_field": "GPU {field}",
-      "battery_field": "Battery {field}",
-      "generic_field": "{field}"
+      "cpu_package_temperature": {"name": "CPU Package Temperature"},
+      "cpu_field": {"name": "CPU {field}"},
+      "memory_field": {"name": "Memory {field}"},
+      "disk_root_field": {"name": "Disk Root {field}"},
+      "disk_field": {"name": "Disk {field}"},
+      "network_field": {"name": "{interface} {field}"},
+      "sensor_field": {"name": "Sensor {field}"},
+      "gpu_field": {"name": "GPU {field}"},
+      "battery_field": {"name": "Battery {field}"},
+      "generic_field": {"name": "{field}"}
     },
     "binary_sensor": {
-      "cpu_package_temperature": "CPU Package Temperature",
-      "cpu_field": "CPU {field}",
-      "memory_field": "Memory {field}",
-      "disk_root_field": "Disk Root {field}",
-      "disk_field": "Disk {field}",
-      "network_field": "{interface} {field}",
-      "sensor_field": "Sensor {field}",
-      "gpu_field": "GPU {field}",
-      "battery_field": "Battery {field}",
-      "generic_field": "{field}"
+      "cpu_package_temperature": {"name": "CPU Package Temperature"},
+      "cpu_field": {"name": "CPU {field}"},
+      "memory_field": {"name": "Memory {field}"},
+      "disk_root_field": {"name": "Disk Root {field}"},
+      "disk_field": {"name": "Disk {field}"},
+      "network_field": {"name": "{interface} {field}"},
+      "sensor_field": {"name": "Sensor {field}"},
+      "gpu_field": {"name": "GPU {field}"},
+      "battery_field": {"name": "Battery {field}"},
+      "generic_field": {"name": "{field}"}
     }
   }
 }

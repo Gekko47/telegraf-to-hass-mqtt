@@ -8,6 +8,7 @@ from typing import Any
 
 import custom_components.telegraf_mqtt as integration
 from custom_components.telegraf_mqtt.const import (
+    CONF_AUTO_DISCOVER,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
     CONF_DEVICE_NAME,
@@ -16,6 +17,8 @@ from custom_components.telegraf_mqtt.const import (
     CONF_FIELD_OVERRIDES,
     CONF_TOPIC_PATTERN,
     DEFAULT_DEVICE_ID_STRATEGY,
+    MAX_EXPIRY_TICK_SECONDS,
+    MIN_EXPIRY_TICK_SECONDS,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_REMOVE_METRIC,
 )
@@ -70,18 +73,24 @@ class FakeConfigEntry:
 class FakeMqtt:
     def __init__(self) -> None:
         self.unsubscribe_called = False
+        self.unsubscribe_calls = 0
         self.topic_pattern: str | None = None
         self.message_callback: Callable[[Any], Any] | None = None
+        # Every subscribe attempt in order -- the live auto-discover
+        # toggle tests count main + snoop subscriptions explicitly.
+        self.subscribe_calls: list[tuple[str, Callable[[Any], Any]]] = []
 
     async def async_subscribe(
         self, hass: FakeHass, topic_pattern: str, callback: Callable[[Any], Any]
     ) -> Callable[[], None]:
+        self.subscribe_calls.append((topic_pattern, callback))
         self.topic_pattern = topic_pattern
         self.message_callback = callback
         return self.unsubscribe
 
     def unsubscribe(self) -> None:
         self.unsubscribe_called = True
+        self.unsubscribe_calls += 1
 
 
 class FakePlatform:
@@ -297,8 +306,127 @@ def test_live_update_recovers_invalid_persisted_values_without_reload(
     assert entry.runtime_data.manager._expire_after == DEFAULT_EXPIRE_AFTER
     assert entry.runtime_data.manager._cleanup_delay == DEFAULT_CLEANUP_DELAY
     assert registry._expire_after == DEFAULT_EXPIRE_AFTER
-    # Expiry rescheduling consumed the normalized value (capped at 30s).
-    assert hass.expiry_interval.total_seconds() == min(DEFAULT_EXPIRE_AFTER, 30)
+    # Expiry rescheduling consumed the normalized value (capped at
+    # MAX_EXPIRY_TICK_SECONDS).
+    assert hass.expiry_interval.total_seconds() == min(DEFAULT_EXPIRE_AFTER, MAX_EXPIRY_TICK_SECONDS)
+
+
+def test_options_update_starts_snoop_live(monkeypatch) -> None:
+    """Toggling ``auto_discover`` on through the live options-update
+    listener starts the snoop listener immediately -- no reload required.
+    The pre-fix behaviour silently did nothing until the entry was
+    reloaded, leaving the user with a feature they believed was active."""
+    fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_AUTO_DISCOVER: True})
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+
+    # Setup opted in: real subscription + snoop (probe == the pattern).
+    assert len(fake_mqtt.subscribe_calls) == 2
+    assert fake_mqtt.subscribe_calls[0][0] == "telegraf/#"
+    assert fake_mqtt.subscribe_calls[1][0] == "telegraf/#"
+    assert entry.runtime_data.unsubscribe_snoop is not None
+
+    # Re-submitting the same toggle is idempotent: no second snoop.
+    entry.options = {CONF_AUTO_DISCOVER: True}
+    asyncio.run(entry._fire_update_listeners(hass))
+    assert len(fake_mqtt.subscribe_calls) == 2
+
+
+def test_options_update_stops_snoop_live_and_restarts(monkeypatch) -> None:
+    """Toggling ``auto_discover`` off through the live options-update
+    listener tears the long-lived snoop subscription down immediately
+    (previously it kept running and dispatching until the next
+    reload/unload), and toggling it back on starts a fresh listener."""
+    fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_AUTO_DISCOVER: True})
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+    assert len(fake_mqtt.subscribe_calls) == 2
+
+    entry.options = {CONF_AUTO_DISCOVER: False}
+    asyncio.run(entry._fire_update_listeners(hass))
+    # The snoop's unsubscribe ran; the handle is wiped so a later
+    # reload/unload cannot double-tear it down.
+    assert fake_mqtt.unsubscribe_calls == 1
+    assert entry.runtime_data.unsubscribe_snoop is None
+
+    # Toggling back on starts a fresh listener.
+    entry.options = {CONF_AUTO_DISCOVER: True}
+    asyncio.run(entry._fire_update_listeners(hass))
+    assert len(fake_mqtt.subscribe_calls) == 3
+    assert entry.runtime_data.unsubscribe_snoop is not None
+
+
+def test_options_update_snoop_start_failure_is_non_fatal(monkeypatch) -> None:
+    """A failing snoop start on the live path logs and moves on: the main
+    subscription stays, no teardown handle is parked, and the entry keeps
+    working (a later options update can retry the start)."""
+    fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry()
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+    assert len(fake_mqtt.subscribe_calls) == 1
+
+    original_subscribe = fake_mqtt.async_subscribe
+
+    async def failing_subscribe(
+        hass: FakeHass, topic_pattern: str, callback: Callable[[Any], Any]
+    ) -> Callable[[], None]:
+        if fake_mqtt.subscribe_calls:
+            # Any call after the main subscription (i.e. the snoop) fails.
+            raise RuntimeError("broker gone")
+        return await original_subscribe(hass, topic_pattern, callback)
+
+    monkeypatch.setattr(fake_mqtt, "async_subscribe", failing_subscribe)
+
+    entry.options = {CONF_AUTO_DISCOVER: True}
+    asyncio.run(entry._fire_update_listeners(hass))
+
+    # The start attempt happened, failed, and was absorbed: no handle,
+    # no crash, and the main subscription is untouched.
+    assert len(fake_mqtt.subscribe_calls) == 1
+    assert entry.runtime_data.unsubscribe_snoop is None
+
+
+def test_options_update_auto_discover_is_a_noop_without_mqtt(monkeypatch) -> None:
+    """Import-isolation guard: the live auto-discover toggle is a no-op
+    when the MQTT component is absent (harness-free environments) -- no
+    listener is started and the entry still applies its other options."""
+    _patch_runtime(monkeypatch)
+    monkeypatch.setattr(integration, "mqtt", None)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_AUTO_DISCOVER: True})
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+
+    entry.options = {CONF_AUTO_DISCOVER: True}
+    asyncio.run(entry._fire_update_listeners(hass))
+
+    # No MQTT component -> no subscription possible, no teardown handle.
+    assert entry.runtime_data.unsubscribe_snoop is None
+
+
+def test_expiry_tick_interval_is_floored_and_capped(monkeypatch) -> None:
+    """The synchronous full-registry scan's cadence is floored above 1s
+    no matter how small ``expire_after`` is, and capped at
+    ``MAX_EXPIRY_TICK_SECONDS``: a once-per-second loop-thread scan
+    would add event-loop latency at fleet scale. Values inside the
+    window pass through unchanged."""
+    for expire_after, expected_seconds in (
+        (1, MIN_EXPIRY_TICK_SECONDS),  # floored
+        (7, 7),  # passthrough
+        (120, MAX_EXPIRY_TICK_SECONDS),  # capped
+    ):
+        _patch_runtime(monkeypatch)
+        hass = FakeHass()
+        entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: expire_after})
+
+        assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+        assert hass.expiry_interval.total_seconds() == expected_seconds
 
 
 def test_unload_entry_succeeds_without_platform_support(monkeypatch) -> None:

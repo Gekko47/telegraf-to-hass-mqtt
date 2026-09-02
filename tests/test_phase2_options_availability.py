@@ -25,6 +25,7 @@ from custom_components.telegraf_mqtt.const import (
     CONF_EXPIRE_AFTER,
     CONF_TOPIC_PATTERN,
     DOMAIN,
+    MIN_EXPIRY_TICK_SECONDS,
 )
 
 # Harness-environmental only: see tests/test_harness_devices.py — the plugin's
@@ -100,9 +101,13 @@ async def test_entity_expires_unavailable_then_recovers_on_next_message(hass, mq
     entity_id = _entity_id_for(hass, _unique_id("server08", "mem_used_percent"))
     assert hass.states.get(entity_id).state == "41.2"
 
-    # Production expiry loop ticks every min(expire_after, 30)s = 1s here; wait
-    # past two ticks so the monotonic-based last_updated genuinely ages out.
-    await asyncio.sleep(2.2)
+    # Production expiry loop ticks every max(MIN_EXPIRY_TICK_SECONDS,
+    # min(expire_after, 30))s = 5s here (the fleet-scale floor). The
+    # first tick at ~5s is already far past expire_after=1 relative to
+    # the message's monotonic last_updated, so one tick plus margin
+    # flips the entity (pre-5s-floor this waited past two 1s ticks
+    # because the first tick could land inside the expire window).
+    await asyncio.sleep(MIN_EXPIRY_TICK_SECONDS + 1.5)
 
     assert hass.states.get(entity_id).state == "unavailable"
 

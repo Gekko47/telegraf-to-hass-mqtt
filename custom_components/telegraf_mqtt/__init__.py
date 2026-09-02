@@ -61,6 +61,8 @@ from .const import (
     DEFAULT_EXPIRE_AFTER,
     DEFAULT_MIN_ACTIVE_METRICS,
     DOMAIN,
+    MAX_EXPIRY_TICK_SECONDS,
+    MIN_EXPIRY_TICK_SECONDS,
     SIGNAL_METRIC_UPDATED,
     SIGNAL_NEW_DEVICE,
     SIGNAL_NEW_METRIC,
@@ -193,33 +195,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # the configured topic pattern matches no traffic.
         #
         # The probe is derived from the user's ``topic_pattern`` so the
-        # snoop never silently widens past the user's scope. A user who
-        # configured ``telegraf/rack1/#`` will only have the snoop
-        # listen on ``telegraf/rack1/#`` -- the rack2 deployment on the
-        # same broker stays invisible to the auto-discover path.
-        if options.auto_discover:
-            # The dispatcher signature matches
-            # ``DeviceManager.process_message(topic, payload)`` exactly,
-            # so the snoop can re-inject every captured message into
-            # the integration's primary parse -> route -> render
-            # pipeline. The ``manager.record_seen_host`` call inside
-            # ``process_message`` keeps ``seen_hosts`` in sync with the
-            # live state, which ``check_no_traffic`` consults for the
-            # Repairs hint.
-            snoop = SnoopListener(
-                timeout_seconds=0.0,
-                probe_topic=derive_probe_topic(topic_pattern),
-                dispatcher=manager.process_message,
-            )
-            try:
-                await snoop.start(hass, mqtt.async_subscribe)
-            except Exception as snoop_err:
-                # Snoop failure is non-fatal -- the main subscription
-                # is the user-facing path; we just log and move on.
-                _LOGGER.debug("Snoop listener failed to start: %s", snoop_err)
-                snoop.stop()
-            else:
-                entry.runtime_data.unsubscribe_snoop = snoop.stop
+        # snoop never silently widens past the user's scope. The start /
+        # stop wiring lives in ``_apply_auto_discover`` so the live
+        # options-update listener can toggle the listener in place too.
+        await _apply_auto_discover(hass, entry, options)
 
     if Platform is not None:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -320,6 +299,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         on_write=lambda unique_key, available, value: _dispatch_metric_updated(hass, entry, unique_key),
     )
     _schedule_expiry_check(hass, entry)
+    # The auto-discover toggle is applied live too: the snoop listener
+    # is started in place when the option turns on and its subscription
+    # is torn down when it turns off. Without this, an opt-in did
+    # nothing until the next reload and an opt-out left the long-lived
+    # listener subscribed and dispatching indefinitely. Idempotent --
+    # no-op when the listener state already matches the option.
+    await _apply_auto_discover(hass, entry, options)
     # Re-run the runtime-detected device-id Repairs checks immediately:
     # a structural option change (exclude_patterns, device_id_strategy,
     # ...) can create or resolve a collision/conflict, and the user
@@ -329,6 +315,56 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     # reload path re-runs them after the rebuild via ``async_setup_entry``.
     check_device_id_collision(hass, entry)
     check_device_id_conflict(hass, entry)
+
+
+async def _apply_auto_discover(hass: HomeAssistant, entry: ConfigEntry, options: TelegrafMqttOptions) -> None:
+    """Start or stop the post-setup snoop so it matches ``options.auto_discover``.
+
+    Shared by ``async_setup_entry`` (initial opt-in) and the live
+    options-update listener, so toggling the option takes effect
+    immediately in both directions instead of silently doing nothing
+    until the next reload -- or, worse, leaving a long-lived listener
+    subscribed and dispatching after the user disabled it. Idempotent:
+    an already-running snoop is never started twice, and stopping with
+    no listener parked is a no-op.
+
+    The snoop's ``dispatcher`` signature matches
+    ``DeviceManager.process_message(topic, payload)`` exactly, so it can
+    re-inject every captured message into the integration's primary
+    parse -> route -> render pipeline. The ``record_seen_host`` call
+    inside ``process_message`` keeps ``seen_hosts`` in sync with the
+    live state, which ``check_no_traffic`` consults for the Repairs
+    hint. The probe is derived from the user's ``topic_pattern``
+    (``derive_probe_topic``) so the snoop never silently widens past the
+    user's scope: a user on ``telegraf/rack1/#`` only ever gets rack1
+    traffic on the auto-discover path.
+    """
+    runtime = entry.runtime_data
+    if mqtt is None or runtime is None or runtime.manager is None:
+        return
+    if options.auto_discover:
+        if runtime.unsubscribe_snoop is not None:
+            return
+        snoop = SnoopListener(
+            timeout_seconds=0.0,
+            probe_topic=derive_probe_topic(entry.data[CONF_TOPIC_PATTERN]),
+            dispatcher=runtime.manager.process_message,
+        )
+        try:
+            await snoop.start(hass, mqtt.async_subscribe)
+        except Exception as snoop_err:
+            # Snoop failure is non-fatal -- the main subscription is
+            # the user-facing path; log and move on without parking a
+            # teardown handle.
+            _LOGGER.debug("Snoop listener failed to start: %s", snoop_err)
+            snoop.stop()
+        else:
+            runtime.unsubscribe_snoop = snoop.stop
+            _LOGGER.info("Auto-discover snoop started on %s", entry.data[CONF_TOPIC_PATTERN])
+    elif runtime.unsubscribe_snoop is not None:
+        runtime.unsubscribe_snoop()
+        runtime.unsubscribe_snoop = None
+        _LOGGER.info("Auto-discover snoop stopped")
 
 
 async def _async_options_maybe_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -342,9 +378,11 @@ async def _async_options_maybe_reload(hass: HomeAssistant, entry: ConfigEntry) -
     documented as MAJOR-breaking. Reloading the entry is the only
     way to keep the entity-registry consistent.
 
-    All other option changes still take the live path through
-    ``_async_options_updated``; this listener only fires the reload
-    when the strategy itself changed.
+    All other option changes take the live path through
+    ``_async_options_updated`` -- including ``auto_discover``, whose
+    snoop listener is started/stopped in place there instead of
+    requiring a reload. This listener only fires the reload when the
+    strategy itself changed.
     """
     runtime = entry.runtime_data
     if runtime is None or runtime.manager is None:
@@ -502,7 +540,18 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if runtime_data.cancel_expiry is not None:
         runtime_data.cancel_expiry()
 
-    interval_seconds = max(1, min(_options_from_entry(entry).expire_after, 30))
+    # The tick body is a synchronous full-registry scan on the event
+    # loop (expiry + cleanup + device pruning + the no-traffic Repairs
+    # check), so the cadence is floored well above 1s: at fleet scale a
+    # once-per-second scan would add measurable loop latency for every
+    # integration sharing the loop. Staleness *detection* is
+    # timestamp-based, so the floor only delays the availability flip
+    # by at most MIN_EXPIRY_TICK_SECONDS for very small expire_after
+    # values -- precision that is not meaningfully useful anyway.
+    interval_seconds = max(
+        MIN_EXPIRY_TICK_SECONDS,
+        min(_options_from_entry(entry).expire_after, MAX_EXPIRY_TICK_SECONDS),
+    )
 
     # @callback is REQUIRED here: async_track_time_interval offloads plain
     # sync functions to executor threads (HassJob), where the dispatcher

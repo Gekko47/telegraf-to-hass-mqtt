@@ -76,6 +76,16 @@ SETUP_MODE_MANUAL = "manual"
 SETUP_MODE_DISCOVER = "discover"
 DEFAULT_DEVICE_NAME = "Telegraf MQTT"
 DEFAULT_EXPIRE_AFTER = 120
+# The periodic registry scan (expiry + cleanup + device pruning + the
+# no-traffic Repairs check) runs synchronously on the event loop, so its
+# cadence is floored well above 1s no matter how small ``expire_after``
+# is: sub-5s cleanup precision is not meaningfully useful, and a
+# once-per-second full scan across every device would add measurable
+# event-loop latency at fleet scale (the scan is O(devices * metrics)
+# and shares the loop with all of Home Assistant). Capped so very large
+# ``expire_after`` values still get a sane cadence.
+MIN_EXPIRY_TICK_SECONDS = 5
+MAX_EXPIRY_TICK_SECONDS = 30
 DEFAULT_ENABLE_CLEANUP = True
 DEFAULT_CLEANUP_DELAY = 30 * 24 * 60 * 60  # 30 days
 DEFAULT_DELETE_DELAY = 60 * 24 * 60 * 60  # 60 days

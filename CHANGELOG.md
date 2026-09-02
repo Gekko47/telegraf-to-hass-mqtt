@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **`auto_discover` toggle now takes effect live** (`__init__.py`).
+  The option was only ever read at setup time: turning it on via the
+  options flow silently did nothing until the entry was reloaded, and
+  turning it off left the long-lived snoop listener subscribed and
+  dispatching into the pipeline indefinitely. The snoop start/stop
+  wiring moved into `_apply_auto_discover`, shared by setup and the
+  live options-update listener, so the toggle starts/stops the
+  listener in place (idempotently, non-fatal on start failure) and
+  logs both transitions.
+- **Entity translations converted to hassfest-compliant mappings**
+  (`strings.json`, `translations/en.json`). hassfest now requires every
+  `entity.<platform>.<translation_key>` value to be a mapping with a
+  `name` key (e.g. `{"name": "CPU {field}"}`) and rejects bare
+  strings, which failed the hassfest CI job with
+  `expected a mapping at 'entity.sensor.cpu_field'`. The rendered
+  names are unchanged; `translations_strings.py` (the in-process
+  English mirror) already used the bare-string form and is unaffected.
 - **Discover-topics pick form is single-select** (`config_flow.py`).
   The form rendered a multi-select list (`multiple=True`) while
   `async_step_pick_topics` silently kept only the first pick
@@ -17,6 +34,19 @@ All notable changes to this project will be documented in this file.
   is the form default. `strings.json` + `translations/en.json` no
   longer invite multi-picking; users who want another topic root add
   another entry.
+
+### Changed
+- **Expiry tick floor raised from 1s to 5s** (`const.py`, `__init__.py`).
+  The periodic registry scan (`check_expiry` + `cleanup` +
+  `prune_empty_devices` + the no-traffic Repairs check) runs
+  synchronously on the event loop, so its interval is now
+  `max(MIN_EXPIRY_TICK_SECONDS, min(expire_after, MAX_EXPIRY_TICK_SECONDS))`
+  instead of flooring at 1s: a once-per-second full scan across every
+  device would add measurable event-loop latency at fleet scale. The
+  scan is O(devices × metrics) and shares the loop with all of Home
+  Assistant. Staleness detection is timestamp-based, so the only
+  observable difference is that availability flips for `expire_after`
+  values below 5s are marked up to 5s late.
 
 ## [1.3.0] - 2026-08-31
 
