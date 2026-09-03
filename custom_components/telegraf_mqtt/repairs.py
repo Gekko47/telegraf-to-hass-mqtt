@@ -105,42 +105,69 @@ def _patterns_overlap(a: str, b: str) -> bool:
       - At every position ``i``, the segments are equal OR at least
         one is ``+`` (single-segment wildcard) → overlap.
       - Otherwise → disjoint.
+
+    Composed of single-responsibility helpers, one per rule, so the
+    top-level function reads as the algorithm outline.
     """
     if a == b:
         return True
     a_parts = a.split("/")
     b_parts = b.split("/")
-
-    def _is_leading_wildcard(parts: list[str]) -> bool:
-        return bool(parts) and parts[0] in ("#", "+")
-
-    def _is_dollar_prefixed(parts: list[str]) -> bool:
-        return bool(parts) and parts[0].startswith("$")
-
-    # MQTT 3.1.1 §4.7 ``$``-topic rule. A leading-wildcard filter
-    # (first segment ``#`` or ``+``) does not match topics whose
-    # first level begins with ``$``, so a leading-wildcard filter
-    # can never overlap a ``$``-prefixed filter.
-    if _is_dollar_prefixed(a_parts) and _is_leading_wildcard(b_parts):
-        return False
-    if _is_dollar_prefixed(b_parts) and _is_leading_wildcard(a_parts):
+    if _is_dollar_topic_disjoint(a_parts, b_parts):
         return False
     # Bare ``#`` matches every topic *except* the ``$``-prefixed
-    # ones, which the two checks above already excluded on the
-    # ``$`` side. So a bare ``#`` here implies overlap.
+    # ones, which the ``$``-disjoint check above already excluded
+    # on the ``$`` side. So a bare ``#`` here implies overlap.
     if a_parts == ["#"] or b_parts == ["#"]:
         return True
-    # Parent-level match: a trailing ``/#`` is treated as also
-    # matching its parent topic. ``a/b`` and ``a/b/#`` share the
-    # parent hierarchy even though the literal ``a/b`` is not
-    # strictly in the match set of ``a/b/#`` per MQTT 3.1.1.
-    if a + "/#" == b or b + "/#" == a:
+    if _is_parent_topic_overlap(a, b):
         return True
-    # Walk the segments, allowing ``#`` to terminate one of the
-    # patterns early as long as the other has more segments.
+    return _segments_overlap(a_parts, b_parts)
+
+
+def _is_leading_wildcard(parts: list[str]) -> bool:
+    return bool(parts) and parts[0] in ("#", "+")
+
+
+def _is_dollar_prefixed(parts: list[str]) -> bool:
+    return bool(parts) and parts[0].startswith("$")
+
+
+def _is_dollar_topic_disjoint(a_parts: list[str], b_parts: list[str]) -> bool:
+    """MQTT 3.1.1 §4.7 ``$``-topic rule.
+
+    A leading-wildcard filter (first segment ``#`` or ``+``) does
+    not match topics whose first level begins with ``$``, so a
+    leading-wildcard filter can never overlap a ``$``-prefixed
+    filter.
+    """
+    return (
+        (_is_dollar_prefixed(a_parts) and _is_leading_wildcard(b_parts))
+        or (_is_dollar_prefixed(b_parts) and _is_leading_wildcard(a_parts))
+    )
+
+
+def _is_parent_topic_overlap(a: str, b: str) -> bool:
+    """A trailing ``/#`` is treated as also matching its parent topic.
+
+    ``a/b`` and ``a/b/#`` share the parent hierarchy even though
+    the literal ``a/b`` is not strictly in the match set of
+    ``a/b/#`` per MQTT 3.1.1.
+    """
+    return a + "/#" == b or b + "/#" == a
+
+
+def _segments_overlap(a_parts: list[str], b_parts: list[str]) -> bool:
+    """Walk the segments, allowing ``#`` to terminate one early.
+
+    The walk allows ``#`` to terminate one of the patterns early
+    as long as the other has more segments. Same length with every
+    segment compatible → overlap; different lengths with no ``#``
+    encountered → disjoint.
+    """
     for i, (seg_a, seg_b) in enumerate(zip(a_parts, b_parts, strict=False)):
         if seg_a == "#":
-            # a# matches the rest of b only if b has anything beyond.
+            # ``#`` matches the rest of b only if b has anything beyond.
             return i < len(b_parts) - 1 or b_parts[i:] != [seg_a]
         if seg_b == "#":
             return i < len(a_parts) - 1 or a_parts[i:] != [seg_b]
@@ -148,8 +175,6 @@ def _patterns_overlap(a: str, b: str) -> bool:
             continue
         if seg_a != seg_b:
             return False
-    # Same length -> every segment compatible. Different lengths with
-    # no ``#`` encountered -> disjoint.
     return len(a_parts) == len(b_parts)
 
 

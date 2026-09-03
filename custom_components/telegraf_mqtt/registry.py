@@ -192,43 +192,67 @@ class MetricRegistry:
         device_id_strategy: str | None = None,
         on_write: Callable[[str, bool, Any], None] | None = None,
     ) -> None:
-        """Apply live configuration options without rebuilding the registry."""
+        """Apply live configuration options without rebuilding the registry.
+
+        Composed of single-responsibility helpers, one per option family,
+        so each branch has its own named surface and the top-level
+        method reads as the option list itself.
+        """
         if expire_after is not None:
             self._expire_after = expire_after
         if cleanup_delay is not None:
             self._cleanup_delay = cleanup_delay
         if delete_delay is not None:
             self._delete_delay = delete_delay
-        if category_overrides is not None:
-            self._category_overrides = category_overrides
-            # Re-emit so the platform's _refresh_descriptor_attributes picks up the new category.
-            for unique_key, state in self._states.items():
-                descriptor = self._apply_overrides(state.raw_descriptor)
-                if descriptor == state.descriptor:
-                    continue
-                state.descriptor = descriptor
-                if on_write is not None:
-                    on_write(unique_key, state.is_available, state.value)
         if device_id_strategy is not None and device_id_strategy in VALID_DEVICE_ID_STRATEGIES:
             self._device_id_strategy = device_id_strategy
+        if category_overrides is not None:
+            self._category_overrides = category_overrides
+            self._reapply_overrides_and_emit(on_write)
         if exclude_patterns is not None:
             self._exclude_patterns = exclude_patterns
-            for unique_key, state in self._states.items():
-                if not self._matches_exclude(unique_key):
-                    continue
-                if state.is_available:
-                    state.is_available = False
-                    if on_write is not None:
-                        on_write(unique_key, False, state.value)
+            self._mark_excluded_metrics_unavailable(on_write)
         if field_overrides is not None:
             self._field_overrides = field_overrides
-            for unique_key, state in self._states.items():
-                descriptor = self._apply_overrides(state.raw_descriptor)
-                if descriptor == state.descriptor:
-                    continue
-                state.descriptor = descriptor
+            self._reapply_overrides_and_emit(on_write)
+
+    def _reapply_overrides_and_emit(
+        self, on_write: Callable[[str, bool, Any], None] | None
+    ) -> None:
+        """Rebuild every cached descriptor and emit state changes.
+
+        Used when ``field_overrides`` or ``category_overrides`` change:
+        the platform-facing descriptor must reflect the new resolution,
+        but the ``raw_descriptor`` (which re-runs ``_apply_overrides`` on
+        every ``update``) is left untouched so the per-message path
+        stays deterministic.
+        """
+        for unique_key, state in self._states.items():
+            descriptor = self._apply_overrides(state.raw_descriptor)
+            if descriptor == state.descriptor:
+                continue
+            state.descriptor = descriptor
+            if on_write is not None:
+                on_write(unique_key, state.is_available, state.value)
+
+    def _mark_excluded_metrics_unavailable(
+        self, on_write: Callable[[str, bool, Any], None] | None
+    ) -> None:
+        """Flip every newly-excluded metric to unavailable and emit the change.
+
+        Exclusion is a state transition: a metric that matches a new
+        exclude pattern is no longer reported. The platform path on
+        ``on_write(..., False, ...)`` removes the entity from the user
+        surface while keeping the entry in the entity registry so
+        lifting the exclusion is purely a recovery transition.
+        """
+        for unique_key, state in self._states.items():
+            if not self._matches_exclude(unique_key):
+                continue
+            if state.is_available:
+                state.is_available = False
                 if on_write is not None:
-                    on_write(unique_key, state.is_available, state.value)
+                    on_write(unique_key, False, state.value)
 
     def get(self, unique_key: str) -> MetricState | None:
         """Return the current state for a key if one already exists."""
@@ -329,6 +353,17 @@ class MetricRegistry:
     ) -> bool:
         """Store a descriptor and emit state updates only when value or availability changes.
 
+        Composed of single-responsibility helpers, one per branch:
+
+        * ``_drop_metric_on_platform_none`` -- a ``platform_hint == "none"``
+          override removes the field from the registry entirely.
+        * ``_register_new_metric`` -- a never-seen-before unique key adds
+          state, emits on_discovered and on_write, and may be dropped by
+          the per-device metric cap.
+        * ``_refresh_existing_metric`` -- a known key with a changed
+          value or recovered availability replaces the state and emits
+          on_write; otherwise the timestamp is bumped in place.
+
         Phase 6: any incoming message clears ``cleanup_candidate_since`` --
         the metric is alive again, so it cannot be a candidate for removal.
         """
@@ -336,45 +371,93 @@ class MetricRegistry:
         descriptor = self._apply_overrides(raw_descriptor)
         if self._matches_exclude(raw_descriptor.unique_key):
             return False
-        # Phase 10: a field override of `{"platform": "none"}` removes
-        # the field from the registry entirely. We also drop the existing
-        # state if this is a transition from a non-`none` hint to `none`.
         if descriptor.platform_hint == PLATFORM_HINT_NONE:
-            existing = self._states.pop(raw_descriptor.unique_key, None)
-            if existing is not None and on_write is not None:
-                on_write(metric_key or descriptor.unique_key, False, existing.descriptor.value)
-            return False
-
+            return self._drop_metric_on_platform_none(raw_descriptor, descriptor, metric_key, on_write)
         current = self._states.get(raw_descriptor.unique_key)
         current_time = self._clock()
-
         if current is None:
-            # Enforce the per-device metric cap: a new metric is dropped
-            # if the registry already has ``max_metrics_per_device``
-            # entries. A value of 0 disables the cap entirely.
-            if self._max_metrics_per_device > 0 and len(self._states) >= self._max_metrics_per_device:
-                self.dropped_metric_count += 1
-                _LOGGER.debug(
-                    "Metric cap reached (%d) for device %s; dropping %s",
-                    self._max_metrics_per_device,
-                    self.device_id,
-                    raw_descriptor.unique_key,
-                )
-                return False
-            self._states[raw_descriptor.unique_key] = MetricState(
-                raw_descriptor=raw_descriptor,
-                descriptor=descriptor,
-                device_id=self.device_id,
-                device_name=self.device_name,
-                last_updated=current_time,
-                is_available=True,
+            return self._register_new_metric(
+                raw_descriptor, descriptor, metric_key, on_discovered, on_write
             )
-            if on_discovered is not None:
-                on_discovered(metric_key or descriptor.unique_key)
-            if on_write is not None:
-                on_write(metric_key or descriptor.unique_key, True, descriptor.value)
-            return True
+        return self._refresh_existing_metric(
+            raw_descriptor, descriptor, current, current_time, metric_key, on_write
+        )
 
+    def _drop_metric_on_platform_none(
+        self,
+        raw_descriptor: MetricDescriptor,
+        descriptor: MetricDescriptor,
+        metric_key: str | None,
+        on_write: Callable[[str, bool, Any], None] | None,
+    ) -> bool:
+        """Remove a metric from the registry when its platform hint is ``none``.
+
+        A field override of ``{"platform": "none"}`` excludes the field
+        from the user surface entirely. The state is gone in both the
+        "never seen" and "transition from another hint" cases; what
+        differs is whether the prior owner needs an ``on_write(False, ...)``
+        so the platform listener can remove the entity.
+        """
+        existing = self._states.pop(raw_descriptor.unique_key, None)
+        if existing is not None and on_write is not None:
+            on_write(metric_key or descriptor.unique_key, False, existing.descriptor.value)
+        return False
+
+    def _register_new_metric(
+        self,
+        raw_descriptor: MetricDescriptor,
+        descriptor: MetricDescriptor,
+        metric_key: str | None,
+        on_discovered: Callable[[str], None] | None,
+        on_write: Callable[[str, bool, Any], None] | None,
+    ) -> bool:
+        """Add a never-seen metric to the registry, subject to the per-device cap.
+
+        A value of 0 disables the cap entirely. Returns ``True`` when
+        the metric was stored, ``False`` when the cap dropped it.
+        """
+        if self._max_metrics_per_device > 0 and len(self._states) >= self._max_metrics_per_device:
+            self.dropped_metric_count += 1
+            _LOGGER.debug(
+                "Metric cap reached (%d) for device %s; dropping %s",
+                self._max_metrics_per_device,
+                self.device_id,
+                raw_descriptor.unique_key,
+            )
+            return False
+        current_time = self._clock()
+        self._states[raw_descriptor.unique_key] = MetricState(
+            raw_descriptor=raw_descriptor,
+            descriptor=descriptor,
+            device_id=self.device_id,
+            device_name=self.device_name,
+            last_updated=current_time,
+            is_available=True,
+        )
+        key = metric_key or descriptor.unique_key
+        if on_discovered is not None:
+            on_discovered(key)
+        if on_write is not None:
+            on_write(key, True, descriptor.value)
+        return True
+
+    def _refresh_existing_metric(
+        self,
+        raw_descriptor: MetricDescriptor,
+        descriptor: MetricDescriptor,
+        current: MetricState,
+        current_time: float,
+        metric_key: str | None,
+        on_write: Callable[[str, bool, Any], None] | None,
+    ) -> bool:
+        """Update an existing metric's value/availability or bump its timestamp.
+
+        A change to the value or a recovery from unavailable rebuilds
+        the state and emits ``on_write``. A no-op refresh leaves the
+        state in place but bumps ``last_updated`` and clears the
+        cleanup candidate flag. Returns ``True`` when ``on_write``
+        fired, ``False`` otherwise.
+        """
         prior_available = current.is_available
         changed = current.value != descriptor.value or prior_available is False
         if changed:
@@ -386,8 +469,9 @@ class MetricRegistry:
                 last_updated=current_time,
                 is_available=True,
             )
+            key = metric_key or descriptor.unique_key
             if on_write is not None:
-                on_write(metric_key or descriptor.unique_key, True, descriptor.value)
+                on_write(key, True, descriptor.value)
             if prior_available is False:
                 # Phase 8 (Silver, log-when-unavailable): an entity coming
                 # back online is edge-triggered (the value/availability

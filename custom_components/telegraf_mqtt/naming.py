@@ -17,7 +17,7 @@ heuristic resolves.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from fnmatch import fnmatchcase
 
 from .heuristics import (
@@ -82,44 +82,81 @@ def _network_token(tag_value: str) -> str:
 
 
 def resolve_translation(measurement: str, tags: Mapping[str, str], field: str) -> tuple[str, dict[str, str]]:
-    """Return ``(translation_key, placeholders)`` for a metric."""
+    """Return ``(translation_key, placeholders)`` for a metric.
+
+    Composed of single-responsibility helpers, one per measurement,
+    so the top-level function reads as a dispatch table. New
+    measurements add a new helper (and one row in the table), not a
+    new branch in a long if/elif chain.
+    """
     measurement_lower = measurement.lower()
     display_field = _display_field(field)
     tag_map = {str(key).lower(): str(value) for key, value in tags.items()}
-
-    if measurement_lower == "sensors":
-        chip = tag_map.get("chip", "").lower()
-        feature = tag_map.get("feature", "").lower()
-        if "coretemp" in chip and "package_id_0" in feature:
-            return TK_CPU_PACKAGE_TEMPERATURE, {}
-
-    if measurement_lower == "disk":
-        path = tag_map.get("path")
-        if path == "/":
-            return TK_DISK_ROOT_FIELD, {"field": display_field}
-
-    if measurement_lower == "cpu":
-        return TK_CPU_FIELD, {"field": display_field}
-    if measurement_lower == "mem":
-        return TK_MEMORY_FIELD, {"field": display_field}
-    if measurement_lower == "disk":
-        return TK_DISK_FIELD, {"field": display_field}
-    if measurement_lower == "net":
-        interface = tag_map.get("interface", "")
-        if interface:
-            return TK_NETWORK_FIELD, {
-                "field": display_field,
-                "interface": _network_token(interface),
-            }
-        return TK_NETWORK_FIELD, {"field": display_field, "interface": ""}
-    if measurement_lower == "sensors":
-        return TK_SENSOR_FIELD, {"field": display_field}
-    if measurement_lower == "nvidia_gpu":
-        return TK_GPU_FIELD, {"field": display_field}
-    if measurement_lower == "battery":
-        return TK_BATTERY_FIELD, {"field": display_field}
-
+    # Per-measurement dispatch. Returning ``None`` from a handler
+    # means "no special case here, fall through to the generic key".
+    handler = _TRANSLATION_DISPATCH.get(measurement_lower)
+    if handler is not None:
+        result = handler(tag_map, display_field)
+        if result is not None:
+            return result
     return TK_GENERIC_FIELD, {"field": display_field}
+
+
+def _translation_disk(
+    tag_map: dict[str, str], display_field: str
+) -> tuple[str, dict[str, str]] | None:
+    """Disk measurements: root path is a special template."""
+    path = tag_map.get("path")
+    if path == "/":
+        return TK_DISK_ROOT_FIELD, {"field": display_field}
+    return TK_DISK_FIELD, {"field": display_field}
+
+
+def _translation_sensors(
+    tag_map: dict[str, str], display_field: str
+) -> tuple[str, dict[str, str]] | None:
+    """Sensors: coretemp package_id_0 is the CPU package temperature."""
+    chip = tag_map.get("chip", "").lower()
+    feature = tag_map.get("feature", "").lower()
+    if "coretemp" in chip and "package_id_0" in feature:
+        return TK_CPU_PACKAGE_TEMPERATURE, {}
+    return TK_SENSOR_FIELD, {"field": display_field}
+
+
+def _translation_net(
+    tag_map: dict[str, str], display_field: str
+) -> tuple[str, dict[str, str]] | None:
+    """Network measurements: include the interface tag when present."""
+    interface = tag_map.get("interface", "")
+    if interface:
+        return TK_NETWORK_FIELD, {
+            "field": display_field,
+            "interface": _network_token(interface),
+        }
+    return TK_NETWORK_FIELD, {"field": display_field, "interface": ""}
+
+
+def _translation_simple(
+    translation_key: str, display_field: str
+) -> tuple[str, dict[str, str]]:
+    """Measurements whose template is just the field name."""
+    return translation_key, {"field": display_field}
+
+
+# Per-measurement translation dispatch. Measurements not in the
+# table fall through to the generic key. Each handler is a
+# ``(tag_map, display_field) -> (key, placeholders) | None``
+# callable; ``None`` is the explicit "fall through" signal for
+# measurements that have a generic variant.
+_TRANSLATION_DISPATCH: dict[str, Callable[[dict[str, str], str], tuple[str, dict[str, str]] | None]] = {
+    "cpu": lambda tags, field: _translation_simple(TK_CPU_FIELD, field),
+    "mem": lambda tags, field: _translation_simple(TK_MEMORY_FIELD, field),
+    "disk": _translation_disk,
+    "net": _translation_net,
+    "sensors": _translation_sensors,
+    "nvidia_gpu": lambda tags, field: _translation_simple(TK_GPU_FIELD, field),
+    "battery": lambda tags, field: _translation_simple(TK_BATTERY_FIELD, field),
+}
 
 
 def resolve_entity_category(measurement: str, field: str) -> str | None:

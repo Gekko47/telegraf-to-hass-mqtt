@@ -622,17 +622,17 @@ def _cap_descriptor(unique_key: str = "cpu_cpu-total_usage_idle", **kwargs: Any)
 
     Any keyword argument overrides the default field value.
     """
-    base = dict(
-        unique_key=unique_key,
-        measurement="cpu",
-        tags={"host": "host1", "cpu": "cpu-total"},
-        field="usage_idle",
-        value=88.4,
-        timestamp=1721664000,
-        native_unit=None,
-        suggested_device_class=None,
-        suggested_state_class="measurement",
-        entity_category=None,
-    )
+    base: dict[str, Any] = {
+        "unique_key": unique_key,
+        "measurement": "cpu",
+        "tags": {"host": "host1", "cpu": "cpu-total"},
+        "field": "usage_idle",
+        "value": 88.4,
+        "timestamp": 1721664000,
+        "native_unit": None,
+        "suggested_device_class": None,
+        "suggested_state_class": "measurement",
+        "entity_category": None,
+    }
     base.update(kwargs)
     return MetricDescriptor(**base)

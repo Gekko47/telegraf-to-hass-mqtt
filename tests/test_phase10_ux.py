@@ -1546,6 +1546,7 @@ def test_retained_message_during_subscribe_reaches_platforms(
     assert manager.get_metric(metric_key) is not None
 
 
+
 def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

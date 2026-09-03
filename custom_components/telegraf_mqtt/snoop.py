@@ -129,7 +129,7 @@ class SnoopListener:
         later use by ``stop()``. When ``timeout_seconds > 0`` a
         ``loop.call_later`` timer is armed so the listener stops
         itself automatically after the configured window (the
-        diagnostics probe path that relies on the 10-second default);
+        config-flow scan path; see config_flow.async_step_scan_running).
         ``timeout_seconds == 0`` keeps the listener long-lived and
         skips the timer entirely (the integration runtime path).
         """

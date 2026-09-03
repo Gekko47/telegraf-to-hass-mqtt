@@ -671,7 +671,13 @@ async def test_signal_remove_metric_drops_only_the_target_entity(hass: HomeAssis
     import time
 
     now = time.monotonic()
-    battery_state.last_updated = 0.0
+    # Drive the battery past `expire_after` (defaults to 120s) by setting
+    # `last_updated` to a monotonic timestamp safely older than the
+    # threshold -- not a hardcoded `0.0`, which only works once the
+    # process has been running for >= `expire_after` of monotonic time
+    # and flakes in short-uptime CI runners / fresh containers.
+    expire_after = registry._expire_after
+    battery_state.last_updated = now - expire_after - 1.0
     cpu_state.last_updated = now
     registry.last_any_metric = now
     registry.check_expiry()
