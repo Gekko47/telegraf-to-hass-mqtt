@@ -69,6 +69,14 @@ def _device_id_conflict_issue_id(entry_id: str) -> str:
     return f"device_id_conflict_{entry_id}"
 
 
+def _device_cap_issue_id(entry_id: str) -> str:
+    return f"device_cap_reached_{entry_id}"
+
+
+def _metric_cap_issue_id(entry_id: str) -> str:
+    return f"metric_cap_reached_{entry_id}"
+
+
 # Conservative MQTT topic overlap check. Two patterns overlap when
 # one is a strict prefix of the other up to a ``/`` boundary AND the
 # shorter pattern ends in ``#`` or a literal segment. Identical
@@ -386,6 +394,90 @@ def _describe_defaults(invalid_keys: list[str]) -> str:
     }
     parts = [f"{k}={defaults[k]}" for k in invalid_keys if k in defaults]
     return "; ".join(parts) if parts else "(see options flow)"
+
+
+def check_device_cap(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for the device cap.
+
+    When ``manager.dropped_device_count > 0``, the integration has
+    dropped measurements from new Telegraf hosts because the entry's
+    ``max_devices`` cap was reached. The issue lists the cap and the
+    number of dropped measurements so the user can either widen the
+    topic pattern (to consolidate hosts) or add another config entry
+    (to split the load). The issue auto-resolves when the count drops
+    back to zero (e.g. after a reload).
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    manager = getattr(runtime_data, "manager", None)
+    if manager is None:
+        return
+    dropped = getattr(manager, "dropped_device_count", 0)
+    if dropped == 0:
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_device_cap_issue_id(entry.entry_id),
+        )
+        return
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=_device_cap_issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="device_cap_reached",
+        translation_placeholders={
+            "dropped": str(dropped),
+            "max_devices": str(getattr(manager, "_max_devices", 0)),
+            "configured_topic": entry.data.get(CONF_TOPIC_PATTERN, ""),
+        },
+    )
+
+
+def check_metric_cap(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for the per-device metric cap.
+
+    When ``manager.dropped_metric_count > 0``, the integration has
+    dropped new metrics from existing devices because a device's
+    ``max_metrics_per_device`` cap was reached. The issue lists the
+    cap and the number of dropped measurements. The issue auto-resolves
+    when the count drops back to zero.
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    manager = getattr(runtime_data, "manager", None)
+    if manager is None:
+        return
+    dropped = getattr(manager, "dropped_metric_count", 0)
+    if dropped == 0:
+        ir.async_delete_issue(
+            hass,
+            domain=DOMAIN,
+            issue_id=_metric_cap_issue_id(entry.entry_id),
+        )
+        return
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=_metric_cap_issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="metric_cap_reached",
+        translation_placeholders={
+            "dropped": str(dropped),
+            "max_metrics_per_device": str(getattr(manager, "_max_metrics_per_device", 0)),
+            "configured_topic": entry.data.get(CONF_TOPIC_PATTERN, ""),
+        },
+    )
 
 
 # The ``ir`` import on the integration module is itself guarded so the

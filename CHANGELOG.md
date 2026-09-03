@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Fleet-scale device and metric caps** (`registry.py`, `repairs.py`,
+  `const.py`, `__init__.py`). A single config entry now caps the
+  number of distinct Telegraf hosts (devices) it tracks at
+  ``DEFAULT_MAX_DEVICES = 30`` and the number of metrics per device
+  at ``MAX_METRICS_PER_DEVICE = 50``. When a new device would exceed
+  the cap, the manager drops the measurement and increments
+  ``dropped_device_count``; the Repairs framework consults this to
+  raise a ``device_cap_reached`` hint. Same for metrics and
+  ``metric_cap_reached``. Both checks are idempotent create-or-delete
+  calls and self-guard when the issue registry is unavailable. A value
+  of 0 disables the respective cap entirely.
+- **Scan progress bar** (`config_flow.py`, `strings.json`,
+  `translations/en.json`). The discover-topics scan step now uses HA's
+  ``async_show_progress`` / ``async_show_progress_done`` protocol so
+  the frontend renders a determinate progress bar
+  (``progress_action="scan_running"``) instead of blocking the step
+  handler silently for up to 300s. The background scan-wait task
+  emits integer percentage updates via ``async_update_progress``; an
+  initial 0% event is emitted immediately so the bar renders even
+  when the snoop finishes on the first check.
+- **CHANGELOG version sync test** (`tests/test_placeholder.py`).
+  ``test_changelog_declares_manifest_version`` asserts that the
+  current ``manifest.json`` version appears as a ``## [X.Y.Z]``
+  heading in ``CHANGELOG.md``, so a release cannot ship without
+  notes.
+
 ### Fixed
 - **`auto_discover` toggle now takes effect live** (`__init__.py`).
   The option was only ever read at setup time: turning it on via the

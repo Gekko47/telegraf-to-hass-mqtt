@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -536,3 +537,102 @@ def test_device_heartbeat_separates_offline_device_from_stale_metric() -> None:
     stale_state = manager.get_metric("server02:used_percent")
     assert stale_state is not None
     assert stale_state.is_available is False
+
+
+# ---------------------------------------------------------------------------
+# Fleet-scale guard: device and metric caps.
+# ---------------------------------------------------------------------------
+def test_device_manager_enforces_max_devices_cap() -> None:
+    """A new device beyond ``max_devices`` is dropped and counted."""
+    manager = DeviceManager(max_devices=2)
+    manager.set_parser(TelegrafParser())
+
+    # Two devices fit.
+    manager.process_message("telegraf/host1/cpu", _cap_payload("cpu", "host1"))
+    manager.process_message("telegraf/host2/cpu", _cap_payload("cpu", "host2"))
+    assert len(manager.devices) == 2
+    assert manager.dropped_device_count == 0
+
+    # Third device is dropped.
+    manager.process_message("telegraf/host3/cpu", _cap_payload("cpu", "host3"))
+    assert len(manager.devices) == 2
+    assert manager.dropped_device_count == 1
+    assert "host3" not in manager.devices
+
+    # Existing devices still work.
+    manager.process_message("telegraf/host1/cpu", _cap_payload("cpu", "host1"))
+    assert manager.dropped_device_count == 1  # no new drop
+
+
+def test_device_manager_max_devices_zero_disables_cap() -> None:
+    """A ``max_devices`` of 0 means unlimited."""
+    manager = DeviceManager(max_devices=0)
+    manager.set_parser(TelegrafParser())
+
+    for i in range(50):
+        manager.process_message(f"telegraf/host{i}/cpu", _cap_payload("cpu", f"host{i}"))
+    assert len(manager.devices) == 50
+    assert manager.dropped_device_count == 0
+
+
+def test_metric_registry_enforces_max_metrics_per_device_cap() -> None:
+    """A new metric beyond ``max_metrics_per_device`` is dropped and counted."""
+    registry = MetricRegistry(max_metrics_per_device=3)
+    registry.update(_cap_descriptor("metric1"))
+    registry.update(_cap_descriptor("metric2"))
+    registry.update(_cap_descriptor("metric3"))
+    assert len(registry) == 3
+    assert registry.dropped_metric_count == 0
+
+    # Fourth metric is dropped.
+    result = registry.update(_cap_descriptor("metric4"))
+    assert result is False
+    assert len(registry) == 3
+    assert registry.dropped_metric_count == 1
+    assert registry.get("metric4") is None
+
+    # Existing metrics still update.
+    registry.update(_cap_descriptor("metric1"))
+    assert registry.dropped_metric_count == 1  # no new drop
+
+
+def test_metric_registry_max_metrics_zero_disables_cap() -> None:
+    """A ``max_metrics_per_device`` of 0 means unlimited."""
+    registry = MetricRegistry(max_metrics_per_device=0)
+    for i in range(60):
+        registry.update(_cap_descriptor(f"metric{i}"))
+    assert len(registry) == 60
+    assert registry.dropped_metric_count == 0
+
+
+def _cap_payload(measurement: str, host: str) -> str:
+    """Build a JSON payload for a Telegraf measurement (cap tests)."""
+    return json.dumps(
+        {
+            "name": measurement,
+            "tags": {"host": host},
+            "fields": {"value": 42.0},
+            "timestamp": 1700000000,
+        }
+    )
+
+
+def _cap_descriptor(unique_key: str = "cpu_cpu-total_usage_idle", **kwargs: Any) -> MetricDescriptor:
+    """Build a minimal MetricDescriptor for cap tests.
+
+    Any keyword argument overrides the default field value.
+    """
+    base = dict(
+        unique_key=unique_key,
+        measurement="cpu",
+        tags={"host": "host1", "cpu": "cpu-total"},
+        field="usage_idle",
+        value=88.4,
+        timestamp=1721664000,
+        native_unit=None,
+        suggested_device_class=None,
+        suggested_state_class="measurement",
+        entity_category=None,
+    )
+    base.update(kwargs)
+    return MetricDescriptor(**base)

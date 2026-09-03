@@ -61,6 +61,10 @@
           "exclude_patterns": "Glob patterns matched against each metric's unique key; matching metrics are hidden and marked unavailable.",
           "category_overrides": "Map of metric unique keys -- or glob patterns like mem_* -- to config, diagnostic, or null. An exact key always wins over a glob; the first matching glob in definition order is used."
         }
+      },
+      "scan_running": {
+        "title": "Discovering topics",
+        "description": "Listening to {probe} for {duration} seconds. Newly seen topics will be collected when the scan completes."
       }
     },
     "error": {
@@ -72,6 +76,9 @@
     },
     "abort": {
       "already_configured": "This topic pattern is already configured."
+    },
+    "progress": {
+      "scan_running": "Listening to {probe} for {duration} seconds. Newly seen topics will be collected when the scan completes."
     }
   },
   "issues": {
@@ -82,6 +89,14 @@
     "invalid_persisted_option": {
       "title": "Invalid Telegraf MQTT option(s)",
       "description": "The persisted value for {options} is invalid. The integration fell back to default values ({defaults}) so setup could complete. Open the integration's options dialog and correct the values, or remove and re-add the entry to reset the options to defaults."
+    },
+    "device_cap_reached": {
+      "title": "Telegraf MQTT device cap reached",
+      "description": "This entry has dropped {dropped} measurements from new Telegraf hosts because the device cap ({max_devices}) was reached. New hosts under \"{configured_topic}\" are being ignored. Add another config entry with a narrower topic pattern to split the load, or consolidate hosts."
+    },
+    "metric_cap_reached": {
+      "title": "Telegraf MQTT metric cap reached",
+      "description": "This entry has dropped {dropped} new metrics because the per-device metric cap ({max_metrics_per_device}) was reached on at least one device. Metrics beyond the cap are being ignored for \"{configured_topic}\"."
     }
   },
   "exceptions": {
@@ -94,28 +109,68 @@
   },
   "entity": {
     "sensor": {
-      "cpu_package_temperature": {"name": "CPU Package Temperature"},
-      "cpu_field": {"name": "CPU {field}"},
-      "memory_field": {"name": "Memory {field}"},
-      "disk_root_field": {"name": "Disk Root {field}"},
-      "disk_field": {"name": "Disk {field}"},
-      "network_field": {"name": "{interface} {field}"},
-      "sensor_field": {"name": "Sensor {field}"},
-      "gpu_field": {"name": "GPU {field}"},
-      "battery_field": {"name": "Battery {field}"},
-      "generic_field": {"name": "{field}"}
+      "cpu_package_temperature": {
+        "name": "CPU Package Temperature"
+      },
+      "cpu_field": {
+        "name": "CPU {field}"
+      },
+      "memory_field": {
+        "name": "Memory {field}"
+      },
+      "disk_root_field": {
+        "name": "Disk Root {field}"
+      },
+      "disk_field": {
+        "name": "Disk {field}"
+      },
+      "network_field": {
+        "name": "{interface} {field}"
+      },
+      "sensor_field": {
+        "name": "Sensor {field}"
+      },
+      "gpu_field": {
+        "name": "GPU {field}"
+      },
+      "battery_field": {
+        "name": "Battery {field}"
+      },
+      "generic_field": {
+        "name": "{field}"
+      }
     },
     "binary_sensor": {
-      "cpu_package_temperature": {"name": "CPU Package Temperature"},
-      "cpu_field": {"name": "CPU {field}"},
-      "memory_field": {"name": "Memory {field}"},
-      "disk_root_field": {"name": "Disk Root {field}"},
-      "disk_field": {"name": "Disk {field}"},
-      "network_field": {"name": "{interface} {field}"},
-      "sensor_field": {"name": "Sensor {field}"},
-      "gpu_field": {"name": "GPU {field}"},
-      "battery_field": {"name": "Battery {field}"},
-      "generic_field": {"name": "{field}"}
+      "cpu_package_temperature": {
+        "name": "CPU Package Temperature"
+      },
+      "cpu_field": {
+        "name": "CPU {field}"
+      },
+      "memory_field": {
+        "name": "Memory {field}"
+      },
+      "disk_root_field": {
+        "name": "Disk Root {field}"
+      },
+      "disk_field": {
+        "name": "Disk {field}"
+      },
+      "network_field": {
+        "name": "{interface} {field}"
+      },
+      "sensor_field": {
+        "name": "Sensor {field}"
+      },
+      "gpu_field": {
+        "name": "GPU {field}"
+      },
+      "battery_field": {
+        "name": "Battery {field}"
+      },
+      "generic_field": {
+        "name": "{field}"
+      }
     }
   }
 }

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from time import monotonic
 from typing import Any
 
 import voluptuous as vol
@@ -377,6 +378,17 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     _scan_seen_topics: frozenset[str] = frozenset()
     _scan_root: str = DEFAULT_SCAN_ROOT_TOPIC
     _scan_duration: int = DEFAULT_SCAN_DURATION_SECONDS
+    # The background task that drives the scan-wait loop. Held so the
+    # progress step can re-enter itself as a SHOW_PROGRESS step (HA's
+    # flow manager re-invokes the current step when the task completes)
+    # without relaunching the scan.
+    _scan_task: Any | None = None
+    # The scan's wall-clock start time (from ``monotonic()``) so
+    # ``_wait_for_scan`` can compute elapsed time for the progress bar.
+    _scan_start_time: float = 0.0
+    # The most recent scan result, stored so the step can harvest it
+    # after the background task completes.
+    _scan_result: Any | None = None
 
     @staticmethod
     @callback
@@ -489,6 +501,11 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         probe / duration -- in that case ``async_step_scan_running``
         will be re-entered and the scan will be relaunched with the
         new parameters.
+
+        Progress is surfaced via HA's ``async_show_progress`` /
+        ``async_show_progress_done`` protocol so the frontend renders a
+        determinate progress bar (``progress_action="scan_running"``)
+        instead of blocking the step handler silently for up to 300s.
         """
         # The user landed on this step without submitting scan_settings
         # (e.g. they hit the menu choice). The defaults from the
@@ -498,38 +515,104 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._scan_root = DEFAULT_SCAN_ROOT_TOPIC
             self._scan_duration = DEFAULT_SCAN_DURATION_SECONDS
 
-        snoop = await self._start_scan(self._scan_root, float(self._scan_duration))
-        self._scan_snoop = snoop
-
-        # Wait for the auto-stop timer. ``is_finished`` flips when
-        # ``_on_timeout`` runs; we also bail out if the user closed
-        # the flow (the snoop is torn down by the unload hook).
-        deadline = float(self._scan_duration) + 5.0
-        try:
-            async with asyncio.timeout(deadline):
-                while not snoop.is_finished:
-                    await asyncio.sleep(0.1)
-        except TimeoutError:
-            # The scan should auto-stop well before this. If we got
-            # here, something went wrong with the timer -- stop the
-            # snoop explicitly so we don't leak the subscription.
-            _LOGGER.debug("Scan for %s exceeded deadline; stopping snoop", self._scan_root)
-            snoop.stop()
-
-        result = snoop.stop()
-        self._scan_seen_topics = result.topics
-
-        if not self._scan_seen_topics:
-            # No traffic on the probe topic. Send the user back to
-            # the settings step with a clear error so they can either
-            # widen the probe or shorten the window.
-            return self.async_show_form(
-                step_id="scan_settings",
-                data_schema=_scan_settings_schema(),
-                errors={"base": "no_traffic_on_scan_root"},
+        # If a previous visit already launched the scan task and it
+        # has not finished, re-show progress (HA re-invokes the step
+        # when the flow manager advances it). If the task is done,
+        # harvest its result and chain to the next step.
+        if self._scan_task is not None and not self._scan_task.done():
+            return self.async_show_progress(
+                step_id="scan_running",
+                progress_action="scan_running",
+                description_placeholders={
+                    "probe": self._scan_root,
+                    "duration": str(self._scan_duration),
+                },
+                progress_task=self._scan_task,
             )
 
-        return await self.async_step_pick_topics()
+        if self._scan_task is not None and self._scan_task.done():
+            # The scan completed (or was force-stopped at the deadline);
+            # harvest the result and chain to the next step.
+            self._scan_task = None
+            result = self._scan_result
+            if result is None:  # pragma: no cover - defensive
+                # Defensive: the task should always store a result before
+                # completing, but if it somehow does not, treat as no
+                # traffic and chain to the no-traffic step.
+                return self.async_show_progress_done(next_step_id="scan_no_traffic")
+            self._scan_seen_topics = result.topics
+            if not self._scan_seen_topics:
+                return self.async_show_progress_done(next_step_id="scan_no_traffic")
+            return self.async_show_progress_done(next_step_id="pick_topics")
+
+        # First (re-)entry: launch the background scan-wait task.
+        snoop = await self._start_scan(self._scan_root, float(self._scan_duration))
+        self._scan_snoop = snoop
+        self._scan_start_time = monotonic()
+        self._scan_task = self.hass.async_create_task(self._wait_for_scan(snoop))
+        return self.async_show_progress(
+            step_id="scan_running",
+            progress_action="scan_running",
+            description_placeholders={
+                "probe": self._scan_root,
+                "duration": str(self._scan_duration),
+            },
+            progress_task=self._scan_task,
+        )
+
+    async def _wait_for_scan(self, snoop: Any) -> Any:
+        """Wait for the snoop's auto-stop timer, emitting progress.
+
+        Returns the ``SnoopResult`` from ``snoop.stop()``. Emits
+        integer percentage updates via ``async_update_progress`` so the
+        frontend renders a determinate progress bar showing how much of
+        the configured scan window has elapsed. A safety deadline
+        (``duration + 5s``) force-stops the snoop if the auto-stop
+        timer misfires, so the broker subscription cannot outlive the
+        flow.
+        """
+        deadline = float(self._scan_duration) + 5.0
+        last_percent = -1
+        try:
+            async with asyncio.timeout(deadline):
+                # Emit an initial progress event so the frontend renders
+                # the bar immediately rather than waiting for the first
+                # tick. The scan may finish on the first check
+                # (``is_finished`` is already True from a parked
+                # auto-stop timer in tests), so without this the
+                # frontend would never see a progress event.
+                self.async_update_progress(0.0)
+                while not snoop.is_finished:
+                    await asyncio.sleep(0.1)
+                    elapsed = monotonic() - self._scan_start_time
+                    progress = min(1.0, elapsed / float(self._scan_duration))
+                    percent = int(progress * 100)
+                    if percent != last_percent:
+                        self.async_update_progress(progress)
+                        last_percent = percent
+        except TimeoutError:
+            _LOGGER.debug("Scan for %s exceeded deadline; stopping snoop", self._scan_root)
+            snoop.stop()
+        result = snoop.stop()
+        self._scan_seen_topics = result.topics
+        self._scan_result = result
+        return result
+
+    async def async_step_scan_no_traffic(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Show the scan_settings form with a no-traffic error.
+
+        A progress step cannot transition directly to a form step, so
+        ``async_step_scan_running`` chains here via
+        ``async_show_progress_done(next_step_id="scan_no_traffic")`` when
+        the scan captures zero topics. This step immediately re-shows
+        the settings form with a clear error so the user can widen the
+        probe or shorten the window.
+        """
+        return self.async_show_form(
+            step_id="scan_settings",
+            data_schema=_scan_settings_schema(),
+            errors={"base": "no_traffic_on_scan_root"},
+        )
 
     async def async_step_pick_topics(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Present the roll-up of seen topics and let the user pick one."""

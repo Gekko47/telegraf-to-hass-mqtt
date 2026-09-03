@@ -86,6 +86,18 @@ DEFAULT_EXPIRE_AFTER = 120
 # ``expire_after`` values still get a sane cadence.
 MIN_EXPIRY_TICK_SECONDS = 5
 MAX_EXPIRY_TICK_SECONDS = 30
+# Fleet-scale guard: the number of distinct Telegraf hosts (devices)
+# a single config entry will track before it starts dropping new
+# measurements and raising a Repairs warning. A shared broker can
+# carry traffic from an arbitrary number of hosts; an unbounded
+# ``DeviceManager.devices`` dict would let a single entry grow
+# without limit and add event-loop latency to the periodic registry
+# scan (which is O(devices * metrics)). ``MAX_DEVICES`` is a hard
+# cap; ``DEFAULT_MAX_DEVICES`` is the default (30 hosts) applied
+# when the user has not opted into a custom value. Set to 0 to
+# disable the cap entirely (not recommended on a shared broker).
+DEFAULT_MAX_DEVICES = 30
+MAX_METRICS_PER_DEVICE = 50
 DEFAULT_ENABLE_CLEANUP = True
 DEFAULT_CLEANUP_DELAY = 30 * 24 * 60 * 60  # 30 days
 DEFAULT_DELETE_DELAY = 60 * 24 * 60 * 60  # 60 days

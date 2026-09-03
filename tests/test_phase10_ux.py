@@ -2094,6 +2094,212 @@ def test_check_device_id_collision_noop_when_manager_missing(monkeypatch) -> Non
     assert fake_ir.created == []
 
 
+def test_check_device_cap_raises_when_dropped(monkeypatch) -> None:
+    """A ``dropped_device_count > 0`` raises a Repairs issue with the count."""
+    from custom_components.telegraf_mqtt.repairs import check_device_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    manager = _manager()
+    manager.dropped_device_count = 5
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    check_device_cap(hass, entry)
+    assert len(fake_ir.created) == 1
+    call = fake_ir.created[0]
+    assert call.issue_id == "device_cap_reached_A"
+    assert call.kwargs["translation_key"] == "device_cap_reached"
+    placeholders = call.kwargs["translation_placeholders"]
+    assert placeholders["dropped"] == "5"
+    assert placeholders["max_devices"] == "30"
+    assert placeholders["configured_topic"] == "telegraf/#"
+
+
+def test_check_device_cap_auto_resolves_when_clean(monkeypatch) -> None:
+    """A ``dropped_device_count == 0`` deletes any prior cap issue."""
+    from custom_components.telegraf_mqtt.repairs import check_device_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    manager = _manager()
+    manager.dropped_device_count = 0
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    check_device_cap(hass, entry)
+    assert fake_ir.created == []
+    assert any(c.issue_id == "device_cap_reached_A" for c in fake_ir.deleted)
+
+
+def test_check_device_cap_noop_when_ir_unavailable(monkeypatch) -> None:
+    """No issue registry -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_device_cap
+
+    monkeypatch.setattr(
+        "custom_components.telegraf_mqtt.repairs._ir",
+        lambda _h: None,
+    )
+    manager = _manager()
+    manager.dropped_device_count = 5
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+    check_device_cap(hass, entry)  # should not raise
+
+
+def test_check_metric_cap_raises_when_dropped(monkeypatch) -> None:
+    """A ``dropped_metric_count > 0`` raises a Repairs issue with the count."""
+    from custom_components.telegraf_mqtt.repairs import check_metric_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    manager = _manager()
+    manager.dropped_metric_count = 12
+    entry = _FakeEntry(
+        entry_id="B",
+        data={CONF_TOPIC_PATTERN: "telegraf/rack1/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    check_metric_cap(hass, entry)
+    assert len(fake_ir.created) == 1
+    call = fake_ir.created[0]
+    assert call.issue_id == "metric_cap_reached_B"
+    assert call.kwargs["translation_key"] == "metric_cap_reached"
+    placeholders = call.kwargs["translation_placeholders"]
+    assert placeholders["dropped"] == "12"
+    assert placeholders["max_metrics_per_device"] == "50"
+    assert placeholders["configured_topic"] == "telegraf/rack1/#"
+
+
+def test_check_metric_cap_auto_resolves_when_clean(monkeypatch) -> None:
+    """A ``dropped_metric_count == 0`` deletes any prior cap issue."""
+    from custom_components.telegraf_mqtt.repairs import check_metric_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    manager = _manager()
+    manager.dropped_metric_count = 0
+    entry = _FakeEntry(
+        entry_id="B",
+        data={CONF_TOPIC_PATTERN: "telegraf/rack1/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    check_metric_cap(hass, entry)
+    assert fake_ir.created == []
+    assert any(c.issue_id == "metric_cap_reached_B" for c in fake_ir.deleted)
+
+
+def test_check_metric_cap_noop_when_ir_unavailable(monkeypatch) -> None:
+    """No issue registry -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_metric_cap
+
+    monkeypatch.setattr(
+        "custom_components.telegraf_mqtt.repairs._ir",
+        lambda _h: None,
+    )
+    manager = _manager()
+    manager.dropped_metric_count = 12
+    entry = _FakeEntry(
+        entry_id="B",
+        data={CONF_TOPIC_PATTERN: "telegraf/rack1/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+    check_metric_cap(hass, entry)  # should not raise
+
+
+def test_check_device_cap_noop_when_runtime_data_missing(monkeypatch) -> None:
+    """Pre-setup entry has no ``runtime_data`` -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_device_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=None,
+    )
+    hass = _FakeHassForRepairs()
+    check_device_cap(hass, entry)
+    assert fake_ir.created == []
+
+
+def test_check_device_cap_noop_when_manager_missing(monkeypatch) -> None:
+    """``runtime_data.manager`` is None -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_device_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    from custom_components.telegraf_mqtt import TelegrafMqttRuntimeData
+
+    runtime = TelegrafMqttRuntimeData(
+        manager=None,  # type: ignore[arg-type]
+        parser=None,  # type: ignore[arg-type]
+        parser_stats=None,
+        manufacturer=None,
+        model=None,
+        sw_version=None,
+    )
+    entry = _FakeEntry(entry_id="A", data={CONF_TOPIC_PATTERN: "telegraf/#"}, runtime_data=runtime)
+    hass = _FakeHassForRepairs()
+    check_device_cap(hass, entry)
+    assert fake_ir.created == []
+
+
+def test_check_metric_cap_noop_when_runtime_data_missing(monkeypatch) -> None:
+    """Pre-setup entry has no ``runtime_data`` -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_metric_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    entry = _FakeEntry(
+        entry_id="B",
+        data={CONF_TOPIC_PATTERN: "telegraf/rack1/#"},
+        runtime_data=None,
+    )
+    hass = _FakeHassForRepairs()
+    check_metric_cap(hass, entry)
+    assert fake_ir.created == []
+
+
+def test_check_metric_cap_noop_when_manager_missing(monkeypatch) -> None:
+    """``runtime_data.manager`` is None -> no-op."""
+    from custom_components.telegraf_mqtt.repairs import check_metric_cap
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    from custom_components.telegraf_mqtt import TelegrafMqttRuntimeData
+
+    runtime = TelegrafMqttRuntimeData(
+        manager=None,  # type: ignore[arg-type]
+        parser=None,  # type: ignore[arg-type]
+        parser_stats=None,
+        manufacturer=None,
+        model=None,
+        sw_version=None,
+    )
+    entry = _FakeEntry(entry_id="B", data={CONF_TOPIC_PATTERN: "telegraf/rack1/#"}, runtime_data=runtime)
+    hass = _FakeHassForRepairs()
+    check_metric_cap(hass, entry)
+    assert fake_ir.created == []
+
+
 def test_check_device_id_conflict_noop_when_runtime_data_missing(
     monkeypatch,
 ) -> None:

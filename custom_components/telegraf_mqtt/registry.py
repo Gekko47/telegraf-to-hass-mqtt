@@ -16,6 +16,8 @@ from .const import (
     CLEANUP_POLICY_ALWAYS,
     CLEANUP_POLICY_NEVER,
     DEFAULT_DEVICE_ID_STRATEGY,
+    DEFAULT_MAX_DEVICES,
+    MAX_METRICS_PER_DEVICE,
     PLATFORM_HINT_AUTO,
     PLATFORM_HINT_NONE,
     VALID_DEVICE_ID_STRATEGIES,
@@ -159,6 +161,7 @@ class MetricRegistry:
         delete_delay: int = 60 * 24 * 60 * 60,
         category_overrides: dict[str, str | None] | None = None,
         device_id_strategy: str = DEFAULT_DEVICE_ID_STRATEGY,
+        max_metrics_per_device: int = MAX_METRICS_PER_DEVICE,
     ) -> None:
         self._expire_after = expire_after
         self._clock = clock or monotonic
@@ -174,6 +177,8 @@ class MetricRegistry:
         self._device_id_strategy = (
             device_id_strategy if device_id_strategy in VALID_DEVICE_ID_STRATEGIES else DEFAULT_DEVICE_ID_STRATEGY
         )
+        self._max_metrics_per_device = max(0, int(max_metrics_per_device))
+        self.dropped_metric_count: int = 0
 
     def apply_options(
         self,
@@ -344,6 +349,18 @@ class MetricRegistry:
         current_time = self._clock()
 
         if current is None:
+            # Enforce the per-device metric cap: a new metric is dropped
+            # if the registry already has ``max_metrics_per_device``
+            # entries. A value of 0 disables the cap entirely.
+            if self._max_metrics_per_device > 0 and len(self._states) >= self._max_metrics_per_device:
+                self.dropped_metric_count += 1
+                _LOGGER.debug(
+                    "Metric cap reached (%d) for device %s; dropping %s",
+                    self._max_metrics_per_device,
+                    self.device_id,
+                    raw_descriptor.unique_key,
+                )
+                return False
             self._states[raw_descriptor.unique_key] = MetricState(
                 raw_descriptor=raw_descriptor,
                 descriptor=descriptor,
@@ -477,6 +494,8 @@ class DeviceManager:
         parser: Any | None = None,
         category_overrides: dict[str, str | None] | None = None,
         device_id_strategy: str = DEFAULT_DEVICE_ID_STRATEGY,
+        max_devices: int = DEFAULT_MAX_DEVICES,
+        max_metrics_per_device: int = MAX_METRICS_PER_DEVICE,
     ) -> None:
         self._clock = clock or monotonic
         self._expire_after = expire_after
@@ -511,6 +530,17 @@ class DeviceManager:
         # the same device_id slug. Common case: two Telegraf
         # containers with the same ``host=localhost`` default.
         self._host_to_device_id: dict[str, set[str]] = {}
+        # Fleet-scale guard: hard caps on the number of distinct devices
+        # (hosts) and metrics per device the manager will track. When a
+        # new device would exceed ``max_devices``, the manager drops the
+        # measurement and counts it in ``dropped_device_count``; the
+        # Repairs framework consults this to raise a hint. Same for
+        # ``max_metrics_per_device`` and ``dropped_metric_count``. A value
+        # of 0 disables the respective cap entirely.
+        self._max_devices = max(0, int(max_devices))
+        self._max_metrics_per_device = max(0, int(max_metrics_per_device))
+        self.dropped_device_count: int = 0
+        self.dropped_metric_count: int = 0
 
     def set_parser(self, parser: Any) -> None:
         """Attach the payload parser used for every subsequent message."""
@@ -561,23 +591,42 @@ class DeviceManager:
             return None
         return registry.get(unique_key)
 
-    def get_or_create_registry(self, device_id: str, device_name: str) -> MetricRegistry:
-        """Lazily create a registry for a new device ID."""
+    def get_or_create_registry(self, device_id: str, device_name: str) -> MetricRegistry | None:
+        """Lazily create a registry for a new device ID.
+
+        Returns ``None`` if creating a new registry would exceed the
+        configured ``max_devices`` cap (and increments
+        ``dropped_device_count``); the caller is responsible for
+        dropping the message. An existing registry is always returned
+        regardless of the cap -- the cap only gates *new* devices.
+        """
         registry = self.devices.get(device_id)
-        if registry is None:
-            registry = MetricRegistry(
-                expire_after=self._expire_after,
-                clock=self._clock,
-                exclude_patterns=self._exclude_patterns,
-                field_overrides=self._field_overrides,
-                device_id=device_id,
-                device_name=device_name,
-                cleanup_delay=self._cleanup_delay,
-                delete_delay=self._delete_delay,
-                category_overrides=self._category_overrides,
-                device_id_strategy=self._device_id_strategy,
+        if registry is not None:
+            registry.device_name = device_name
+            return registry
+        # New device: enforce the cap before creating a registry.
+        if self._max_devices > 0 and len(self.devices) >= self._max_devices:
+            self.dropped_device_count += 1
+            _LOGGER.debug(
+                "Device cap reached (%d); dropping measurement for new device %s",
+                self._max_devices,
+                device_id,
             )
-            self.devices[device_id] = registry
+            return None
+        registry = MetricRegistry(
+            expire_after=self._expire_after,
+            clock=self._clock,
+            exclude_patterns=self._exclude_patterns,
+            field_overrides=self._field_overrides,
+            device_id=device_id,
+            device_name=device_name,
+            cleanup_delay=self._cleanup_delay,
+            delete_delay=self._delete_delay,
+            category_overrides=self._category_overrides,
+            device_id_strategy=self._device_id_strategy,
+            max_metrics_per_device=self._max_metrics_per_device,
+        )
+        self.devices[device_id] = registry
         registry.device_name = device_name
         return registry
 
@@ -696,6 +745,11 @@ class DeviceManager:
         for device_id, group in groups.items():
             is_new = device_id not in self.devices
             registry = self.get_or_create_registry(device_id, names[device_id])
+            if registry is None:
+                # Device cap reached; the message is dropped. The
+                # record_seen_host call above still tracked the topic/host
+                # so the Repairs framework can tell the user.
+                continue
             registry.last_any_metric = self._clock()
             for descriptor in group:
                 metric_key = f"{device_id}:{descriptor.unique_key}"

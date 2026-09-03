@@ -307,6 +307,40 @@ def test_pyproject_version_matches_manifest() -> None:
     )
 
 
+def test_changelog_declares_manifest_version() -> None:
+    """``CHANGELOG.md`` must declare the current ``manifest.json`` version.
+
+    The release workflow cuts a tag from the manifest version; the
+    CHANGELOG must have a ``## [X.Y.Z]`` heading for that version so
+    the release notes are discoverable. This is a one-way check: the
+    CHANGELOG may also contain ``## [Unreleased]`` and older versions,
+    but the current manifest version must appear as a heading.
+
+    Catches the drift where the manifest was bumped to a new version
+    but the CHANGELOG still only documented the previous release -- a
+    missing heading means the new release would ship without notes.
+    """
+    import re
+
+    manifest_path = Path("custom_components/telegraf_mqtt/manifest.json")
+    changelog_path = Path("CHANGELOG.md")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    changelog = changelog_path.read_text(encoding="utf-8")
+
+    manifest_version = manifest.get("version")
+    assert manifest_version, "manifest.json has no version"
+
+    # Find all ## [X.Y.Z] headings (ignore ## [Unreleased] and other
+    # non-version headings).
+    heading_versions = re.findall(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", changelog, re.MULTILINE)
+    assert heading_versions, "CHANGELOG.md has no version headings"
+    assert manifest_version in heading_versions, (
+        f"CHANGELOG.md does not declare a heading for the current "
+        f"manifest version {manifest_version!r}; found {heading_versions!r}"
+    )
+
+
 def test_readme_documents_install_and_configuration() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 

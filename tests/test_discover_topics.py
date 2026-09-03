@@ -447,9 +447,16 @@ def _make_scan_flow() -> tuple[TelegrafMqttConfigFlow, list[dict[str, Any]], lis
     ``async_on_unload`` recorder so ``_start_scan``'s teardown registration
     is observable regardless of the installed HA version. Returns
     ``(flow, forms, unload_hooks)``.
+
+    Also stubs the progress-step API (``async_show_progress``,
+    ``async_show_progress_done``, ``async_update_progress``) and the
+    ``hass.async_create_task`` runner so the progress-based scan flow
+    can be exercised without a real HA flow manager. The progress
+    events are recorded on ``flow._progress_events`` for assertion.
     """
     flow = TelegrafMqttConfigFlow()
     forms: list[dict[str, Any]] = []
+    progress_events: list[dict[str, Any]] = []
 
     def _show_form(*, step_id: str, data_schema: Any = None, errors: dict | None = None, **_kw: Any) -> dict[str, Any]:
         record = {"type": "form", "step_id": step_id, "data_schema": data_schema, "errors": dict(errors or {})}
@@ -459,6 +466,32 @@ def _make_scan_flow() -> tuple[TelegrafMqttConfigFlow, list[dict[str, Any]], lis
     def _create_entry(*, title: str | None = None, data: Any = None, **_kw: Any) -> dict[str, Any]:
         return {"type": "create_entry", "title": title, "data": dict(data or {})}
 
+    def _show_progress(
+        *,
+        step_id: str,
+        progress_action: str,
+        description_placeholders: dict | None = None,
+        progress_task: Any = None,
+        **_kw: Any,
+    ) -> dict[str, Any]:
+        record = {
+            "type": "progress",
+            "step_id": step_id,
+            "progress_action": progress_action,
+            "description_placeholders": dict(description_placeholders or {}),
+            "progress_task": progress_task,
+        }
+        forms.append(record)
+        return record
+
+    def _show_progress_done(*, next_step_id: str, **_kw: Any) -> dict[str, Any]:
+        record = {"type": "progress_done", "next_step_id": next_step_id}
+        forms.append(record)
+        return record
+
+    def _update_progress(progress: float) -> None:
+        progress_events.append({"progress": progress})
+
     async def _set_unique_id(*_a: Any, **_kw: Any) -> None:
         return None
 
@@ -466,12 +499,22 @@ def _make_scan_flow() -> tuple[TelegrafMqttConfigFlow, list[dict[str, Any]], lis
     flow.async_create_entry = _create_entry  # type: ignore[method-assign]
     flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign,assignment]
     flow._abort_if_unique_id_configured = lambda: None  # type: ignore[method-assign]
+    flow.async_show_progress = _show_progress  # type: ignore[method-assign]
+    flow.async_show_progress_done = _show_progress_done  # type: ignore[method-assign]
+    flow.async_update_progress = _update_progress  # type: ignore[method-assign]
+    flow._progress_events = progress_events  # type: ignore[attr-defined]
     unload_hooks: list[Callable[[], None]] = []
     flow.async_on_unload = unload_hooks.append  # type: ignore[method-assign]
     # ``hass.loop`` is deliberately not armed here: ``get_running_loop()``
     # only works inside a coroutine, so the scan-pipeline tests arm the
     # fake loop inside their ``_run()`` before starting the step task.
     flow.hass = type("H", (), {})()  # type: ignore[assignment]
+    # ``async_create_task`` runs the coroutine on the running loop and
+    # returns a task. We wrap it so the test can introspect the task
+    # and force it to completion.
+    def _create_task(coro: Any) -> asyncio.Task[Any]:
+        return asyncio.ensure_future(coro)
+    flow.hass.async_create_task = _create_task  # type: ignore[attr-defined]
     return flow, forms, unload_hooks
 
 
@@ -518,11 +561,17 @@ def test_scan_pipeline_valid_settings_reaches_pick_topics(monkeypatch: pytest.Mo
 
     The fake loop parks the snoop's auto-stop timer: the test injects
     rack1 traffic while the scan is running and then fires the parked
-    stop, so the whole scan window elapses instantly. Also pins the
+    stop, so the whole scan window elapses instantly. Pins the
     ``_start_scan`` teardown contract: the snoop's ``stop`` is registered
     on the flow's unload hooks (so a user cancelling the flow mid-scan
     cannot leak the broker subscription), and ``stop()`` cancels the
     parked timer and unsubscribes.
+
+    The progress-based scan flow returns a ``progress`` result from
+    ``async_step_scan_settings`` (which chains to
+    ``async_step_scan_running``), and the flow's progress task must
+    complete before the manager re-invokes the step and chains to
+    ``async_step_pick_topics`` via ``async_show_progress_done``.
     """
     mqtt = _FakeMqtt()
     monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
@@ -530,9 +579,13 @@ def test_scan_pipeline_valid_settings_reaches_pick_topics(monkeypatch: pytest.Mo
 
     async def _run() -> dict[str, Any]:
         flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
-        task = asyncio.ensure_future(
-            flow.async_step_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5})
+        result = await flow.async_step_scan_settings(
+            {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5}
         )
+        # First call returns the progress result.
+        assert result["type"] == "progress"
+        assert result["step_id"] == "scan_running"
+        assert result["progress_action"] == "scan_running"
         # Wait for the scan subscription to be installed on the broker.
         while not mqtt.subscribed_topics:
             await asyncio.sleep(0)
@@ -545,42 +598,71 @@ def test_scan_pipeline_valid_settings_reaches_pick_topics(monkeypatch: pytest.Mo
         # The unload hook is the snoop's own stop; firing the parked
         # auto-stop timer cancels the timer handle and unsubscribes.
         assert unload_hooks and unload_hooks[0].__self__ is flow._scan_snoop
+        # Wait for the background _wait_for_scan task, then fire the
+        # snoop's auto-stop to let it complete.
+        scan_task = flow._scan_task
+        assert scan_task is not None
         flow._scan_snoop._on_timeout()
+        await asyncio.wait_for(scan_task, 5)
         assert flow.hass.loop.timers and flow.hass.loop.timers[0].cancelled
         assert mqtt.subscribed_topics == []
-        return await asyncio.wait_for(task, 5)
+        # Re-invoking the step after the task completes chains to pick_topics.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress_done"
+        assert result["next_step_id"] == "pick_topics"
+        # The flow manager would then invoke async_step_pick_topics.
+        result = await flow.async_step_pick_topics()
+        return result
 
     result = asyncio.run(_run())
     assert result["type"] == "form"
     assert result["step_id"] == "pick_topics"
     assert flow._scan_seen_topics == {"telegraf/rack1/cpu", "telegraf/rack1/mem"}
     assert forms and forms[-1]["step_id"] == "pick_topics"
+    # Progress events were emitted (at least one integer percentage).
+    assert flow._progress_events, "no progress events were emitted"
+    assert all(0.0 <= e["progress"] <= 1.0 for e in flow._progress_events)
 
 
 def test_scan_pipeline_no_traffic_returns_to_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A scan window with zero traffic reroutes to the settings form with
-    a clear error, and the subscription is still torn down."""
+    """A scan window with zero traffic chains to the scan_no_traffic
+    step which re-shows the settings form with a clear error, and the
+    subscription is still torn down."""
     mqtt = _FakeMqtt()
     monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
-    flow, _forms, _hooks = _make_scan_flow()
+    flow, forms, _hooks = _make_scan_flow()
 
     async def _run() -> dict[str, Any]:
         flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
-        task = asyncio.ensure_future(
-            flow.async_step_scan_settings({CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5})
+        result = await flow.async_step_scan_settings(
+            {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5}
         )
+        assert result["type"] == "progress"
         while not mqtt.subscribed_topics:
             await asyncio.sleep(0)
         while flow._scan_snoop is None:
             await asyncio.sleep(0)
+        scan_task = flow._scan_task
+        assert scan_task is not None
         flow._scan_snoop._on_timeout()
-        return await asyncio.wait_for(task, 5)
+        await asyncio.wait_for(scan_task, 5)
+        # Re-invoke: scan completed with no traffic -> chains to scan_no_traffic.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress_done"
+        assert result["next_step_id"] == "scan_no_traffic"
+        # The scan_no_traffic step re-shows the settings form with the error.
+        result = await flow.async_step_scan_no_traffic()
+        return result
 
     result = asyncio.run(_run())
     assert result["type"] == "form"
     assert result["step_id"] == "scan_settings"
     assert result["errors"] == {"base": "no_traffic_on_scan_root"}
     assert mqtt.subscribed_topics == []
+    # The scan_no_traffic step was recorded in the forms log.
+    scan_no_traffic_records = [f for f in forms if f.get("step_id") == "scan_settings"]
+    assert scan_no_traffic_records
+    assert scan_no_traffic_records[-1]["errors"] == {"base": "no_traffic_on_scan_root"}
 
 
 def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -590,9 +672,12 @@ def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatc
     misfires (``is_finished`` stays False), the step's own
     ``asyncio.timeout`` deadline must stop the snoop explicitly -- the
     broker subscription cannot outlive the flow -- and the flow must
-    still continue with whatever the snoop managed to capture. Driving
-    ``async_step_scan_running`` with no prior settings submit also covers
-    the default-fill branch.
+    still continue with whatever the snoop managed to capture.
+
+    The progress task wraps the wait loop, so the deadline fires inside
+    ``_wait_for_scan`` and the task completes with the snoop's
+    captured topics. Re-invoking the step after the task completes
+    chains to ``pick_topics`` with the captured data.
     """
     stop_calls = 0
 
@@ -626,7 +711,20 @@ def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatc
     flow, forms, _hooks = _make_scan_flow()
 
     async def _run() -> dict[str, Any]:
-        return await flow.async_step_scan_running()
+        # First call: launches the background task and returns progress.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress"
+        # The wait task should complete immediately (asyncio.timeout raised).
+        scan_task = flow._scan_task
+        assert scan_task is not None
+        await asyncio.wait_for(scan_task, 5)
+        # Re-invoking the step after the task completes chains to pick_topics.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress_done"
+        assert result["next_step_id"] == "pick_topics"
+        # The flow manager would then invoke async_step_pick_topics.
+        result = await flow.async_step_pick_topics()
+        return result
 
     result = asyncio.run(_run())
     # Force-stopped (not left running), then read once more for the result.
@@ -635,6 +733,120 @@ def test_scan_pipeline_deadline_force_stops_snoop(monkeypatch: pytest.MonkeyPatc
     assert result["step_id"] == "pick_topics"
     assert flow._scan_seen_topics == {"telegraf/rack1/cpu"}
     assert forms and forms[-1]["step_id"] == "pick_topics"
+
+
+def test_scan_progress_emits_initial_event_before_snoop_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The progress step emits an initial progress event (0.0) so the
+    frontend renders the bar immediately, even when the snoop finishes
+    on the first check (e.g. a parked auto-stop timer in tests)."""
+    mqtt = _FakeMqtt()
+    monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
+    flow, forms, _hooks = _make_scan_flow()
+
+    async def _run() -> dict[str, Any]:
+        flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
+        result = await flow.async_step_scan_settings(
+            {CONF_SCAN_ROOT_TOPIC: "telegraf/#", CONF_SCAN_DURATION_SECONDS: 5}
+        )
+        assert result["type"] == "progress"
+        while flow._scan_snoop is None:
+            await asyncio.sleep(0)
+        # Fire the parked auto-stop to let the snoop finish immediately.
+        flow._scan_snoop._on_timeout()
+        scan_task = flow._scan_task
+        assert scan_task is not None
+        await asyncio.wait_for(scan_task, 5)
+        return result
+
+    asyncio.run(_run())
+    # The initial progress event was emitted even though the snoop
+    # finished on the first check (the parked timer never elapsed).
+    assert flow._progress_events, "no initial progress event was emitted"
+    assert flow._progress_events[0]["progress"] == 0.0
+    # The forms log records the progress step with the expected
+    # placeholders so the frontend can render the description.
+    progress_records = [f for f in forms if f.get("type") == "progress"]
+    assert progress_records
+    assert progress_records[0]["description_placeholders"]["probe"] == "telegraf/#"
+    assert progress_records[0]["description_placeholders"]["duration"] == "5"
+
+
+def test_scan_progress_emits_increasing_fractions_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The progress loop emits increasing fractions (0.0, then a value
+    between 0 and 1) as the scan window elapses, not just the initial
+    0.0 event. The snoop becomes finished only after a few ticks so the
+    loop body executes."""
+    mqtt = _FakeMqtt()
+    monkeypatch.setattr("homeassistant.components.mqtt.async_subscribe", mqtt.async_subscribe)
+    flow, forms, _hooks = _make_scan_flow()
+
+    tick_count = [0]
+
+    class _SlowSnoop:
+        """Snoop double that finishes after ~3 ticks of the progress loop."""
+
+        @property
+        def is_finished(self) -> bool:
+            tick_count[0] += 1
+            return tick_count[0] >= 3
+
+        def stop(self) -> SnoopResult:
+            return SnoopResult(
+                hosts=frozenset({"rack1"}),
+                topics=frozenset({"telegraf/rack1/cpu"}),
+                duration_seconds=0.0,
+            )
+
+    async def _fake_start_scan(self: Any, probe: str, duration: float) -> _SlowSnoop:
+        return _SlowSnoop()
+
+    monkeypatch.setattr(TelegrafMqttConfigFlow, "_start_scan", _fake_start_scan)
+
+    async def _run() -> dict[str, Any]:
+        flow.hass.loop = _FakeFlowLoop(asyncio.get_running_loop())
+        # Set the scan params (normally done by async_step_scan_settings).
+        flow._scan_root = "telegraf/#"
+        flow._scan_duration = 1
+        # Call the running step directly: the first entry launches the
+        # background task and returns the progress result.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress"
+        scan_task = flow._scan_task
+        assert scan_task is not None
+        # While the task is still running, re-invoking the step should
+        # re-show progress (the not-done branch).
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress"
+        # Wait for the background task to complete.
+        await asyncio.wait_for(scan_task, 5)
+        # After the task completes, the step chains to the next one.
+        result = await flow.async_step_scan_running()
+        assert result["type"] == "progress_done"
+        assert result["next_step_id"] == "pick_topics"
+        # The flow manager would then invoke async_step_pick_topics.
+        result = await flow.async_step_pick_topics()
+        return result
+
+    result = asyncio.run(_run())
+    assert result["type"] == "form"
+    assert result["step_id"] == "pick_topics"
+    # The progress loop fired more than once: the initial 0.0 event plus
+    # at least one mid-scan event (the snoop became finished after ~3
+    # ticks, so the loop iterated at least twice before exiting).
+    assert len(flow._progress_events) >= 2
+    # Progress fractions are monotonically non-decreasing.
+    fractions = [e["progress"] for e in flow._progress_events]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0.0
+    # The first re-show (not-done) branch is exercised: the forms log
+    # records two progress entries (the initial launch and the re-show
+    # while the task was still running).
+    progress_records = [f for f in forms if f.get("type") == "progress"]
+    assert len(progress_records) >= 2
 
 
 def test_pick_topics_submit_creates_entry() -> None:

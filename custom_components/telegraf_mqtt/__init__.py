@@ -72,9 +72,11 @@ from .const import (
 from .parser import ParserStats, TelegrafParser
 from .registry import DeviceManager
 from .repairs import (
+    check_device_cap,
     check_device_id_collision,
     check_device_id_conflict,
     check_invalid_persisted_option,
+    check_metric_cap,
     check_no_traffic,
     check_overlapping_topics,
 )
@@ -233,6 +235,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # different topic patterns.
     check_device_id_collision(hass, entry)
     check_device_id_conflict(hass, entry)
+    # Fleet-scale guard: raise a Repairs hint when the device or
+    # metric cap has caused measurements to be dropped. Both checks
+    # are idempotent create-or-delete calls and self-guard when the
+    # issue registry is unavailable.
+    check_device_cap(hass, entry)
+    check_metric_cap(hass, entry)
 
     return True
 
@@ -315,6 +323,11 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     # reload path re-runs them after the rebuild via ``async_setup_entry``.
     check_device_id_collision(hass, entry)
     check_device_id_conflict(hass, entry)
+    # Also re-run the fleet-scale cap checks: a live options change
+    # does not reset the dropped counts, but the user should see the
+    # current cap state reflected in the Repairs UI without a reload.
+    check_device_cap(hass, entry)
+    check_metric_cap(hass, entry)
 
 
 async def _apply_auto_discover(hass: HomeAssistant, entry: ConfigEntry, options: TelegrafMqttOptions) -> None:
