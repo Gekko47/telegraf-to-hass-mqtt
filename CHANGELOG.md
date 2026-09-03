@@ -32,6 +32,26 @@ All notable changes to this project will be documented in this file.
   notes.
 
 ### Fixed
+- **New Telegraf measurements on an established device are not picked up
+  at first start or after a reconfigure** (`__init__.py`). The integration
+  subscribed to MQTT before forwarding to the sensor / binary_sensor
+  platforms. With retained traffic or a fast-fire publisher, the broker
+  delivered the first metrics into a registry whose
+  ``SIGNAL_NEW_METRIC`` dispatcher had zero listeners (the platforms had
+  not yet connected theirs), so the new entity was silently dropped.
+  A manual reload could mask the symptom by re-running setup in a
+  timing window that happened to land cleanly. ``async_setup_entry`` now
+  forwards to the platforms BEFORE any MQTT subscription is established;
+  retained messages, fresh messages, and snoop-dispatched messages all
+  flow through a registry whose dispatcher listeners are already live.
+  A regression test
+  (``test_retained_message_during_subscribe_reaches_platforms`` in
+  ``tests/test_phase10_ux.py``) pins the contract: a retained message
+  delivered inside ``mqtt.async_subscribe`` must produce a
+  ``SIGNAL_NEW_METRIC`` dispatch and the metric must end up in the
+  manager. The test was verified to fail against the pre-fix ordering
+  with ``call_order=['subscribe', 'subscribe', 'forward']`` and pass
+  against the post-fix ordering.
 - **`auto_discover` toggle now takes effect live** (`__init__.py`).
   The option was only ever read at setup time: turning it on via the
   options flow silently did nothing until the entry was reloaded, and

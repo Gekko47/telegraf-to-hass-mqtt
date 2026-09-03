@@ -151,6 +151,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sw_version=entry.data.get("sw_version"),
     )
 
+    # Connect platform dispatcher listeners BEFORE any MQTT subscription
+    # is established. ``manager.set_callbacks`` wires the synchronous
+    # ``on_discovered`` -> ``_dispatch_new_metric`` -> ``async_dispatcher_send``
+    # path: when ``manager.process_message`` discovers a new metric (which
+    # happens for any retained or fresh MQTT payload), it fires
+    # ``SIGNAL_NEW_METRIC`` synchronously. If the sensor / binary_sensor
+    # platforms have not yet connected their listeners -- the previous
+    # ordering did the broker subscription first, the platform forward
+    # second -- that signal is dispatched into a void of zero listeners
+    # and the new entity never appears. The platform's startup-time
+    # ``for metric_key in manager: add_metric(metric_key)`` loop cannot
+    # recover from this: by the time the platforms listen, the metric
+    # is already in the registry but ``SIGNAL_NEW_METRIC`` was emitted
+    # with no listener connected, so the platform's first chance to
+    # notice it is the next retained message -- which may never come.
+    #
+    # Forwarding platforms first guarantees that:
+    # 1. ``SIGNAL_NEW_METRIC`` listeners are connected before the broker
+    #    subscription is established.
+    # 2. Any retained message the broker flushes during
+    #    ``mqtt.async_subscribe`` flows through a registry whose
+    #    dispatcher has live listeners, so the new entity is created
+    #    during the same ``await`` instead of being silently dropped.
+    # 3. The snoop listener (started after the main subscription) re-
+    #    dispatches into the same already-connected pipeline, so
+    #    ``auto_discover`` events also reach the platform.
+    if Platform is not None:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     if mqtt is not None:
         topic_pattern = entry.data[CONF_TOPIC_PATTERN]
 
@@ -201,9 +230,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # stop wiring lives in ``_apply_auto_discover`` so the live
         # options-update listener can toggle the listener in place too.
         await _apply_auto_discover(hass, entry, options)
-
-    if Platform is not None:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if async_track_time_interval is not None:
         _schedule_expiry_check(hass, entry)

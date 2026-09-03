@@ -1231,8 +1231,19 @@ class _FakeSetupEntry:
 class _SetupFakeMqtt:
     """MQTT double exposing the Phase 10 ``async_wait_for_mqtt_client`` precheck."""
 
-    def __init__(self, wait_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        wait_error: Exception | None = None,
+        retained_message: _FakeMqttMessage | None = None,
+    ) -> None:
         self.wait_error = wait_error
+        # Optional payload to deliver through the LIVE subscription callback
+        # during ``async_subscribe``. Used to simulate a broker flushing a
+        # retained message in the same await that establishes the
+        # subscription -- the exact window where the previous
+        # setup-ordering race lost ``SIGNAL_NEW_METRIC`` dispatches because
+        # the platform listeners had not been connected yet.
+        self.retained_message = retained_message
         self.subscribe_calls: list[tuple[str, Callable[..., Any]]] = []
         self.unsubscribe_calls = 0
 
@@ -1242,6 +1253,26 @@ class _SetupFakeMqtt:
 
     async def async_subscribe(self, _hass: Any, topic: str, cb: Callable[..., Any]) -> Callable[[], None]:
         self.subscribe_calls.append((topic, cb))
+        if self.retained_message is not None:
+            # Deliver the retained message inside the ``await async_subscribe(...)``
+            # window -- this is what a real broker does for a topic with
+            # retained messages on subscription. With the post-fix
+            # ordering, the platform dispatcher listeners are already
+            # connected by the time we get here, so the
+            # ``SIGNAL_NEW_METRIC`` dispatch reaches them. With the
+            # pre-fix ordering, this dispatch landed in the void and the
+            # entity was never created.
+            #
+            # The runtime's message callback is an async coroutine
+            # (``async def message_received(message)``); the SnoopListener's
+            # callback is also a coroutine. Awaiting the result here is
+            # what makes the broker-side flush actually reach the
+            # manager -- a plain ``cb(message)`` call would only create
+            # a coroutine object that is never driven, and the
+            # dispatcher would never fire.
+            result = cb(self.retained_message)
+            if asyncio.iscoroutine(result):
+                await result
         return self._unsubscribe
 
     def _unsubscribe(self) -> None:
@@ -1395,6 +1426,124 @@ def test_options_flow_enables_snoop_on_reload(
     assert fake_mqtt.subscribe_calls[2][0] == "telegraf/#"  # cycle 2 snoop
     # The runtime parked a snoop teardown handle on the second cycle.
     assert entry.runtime_data.unsubscribe_snoop is not None
+
+
+# ---------------------------------------------------------------------------
+# Setup-ordering regression: a retained MQTT message flushed during
+# ``mqtt.async_subscribe`` MUST reach the platform dispatcher listeners.
+# Pre-fix ordering established the subscription before forwarding to the
+# platforms, so the ``SIGNAL_NEW_METRIC`` dispatch fired into a void of
+# zero listeners and the entity was silently dropped. The user-visible
+# symptom was "auto-discover doesn't add new entities to an established
+# device after a reconfigure (or at first start with retained traffic)."
+# ---------------------------------------------------------------------------
+
+
+def test_retained_message_during_subscribe_reaches_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker delivering a retained message in the same await that
+    establishes the subscription must produce a ``SIGNAL_NEW_METRIC``
+    dispatch that the platforms actually receive.
+
+    Pins the contract that ``async_setup_entry`` forwards to the
+    platforms BEFORE the MQTT subscription is established. With the
+    pre-fix ordering, the dispatch hit an empty listener list and the
+    new metric was registered in the manager but never surfaced as an
+    entity. With the post-fix ordering, the platform listeners are
+    connected first, so the dispatch lands and the entity is created.
+    """
+    # Capture the order in which the two setup primitives are called.
+    # The test asserts ``forward`` strictly precedes ``subscribe``; the
+    # broker delivers the retained message inside the ``subscribe``
+    # await, so any listener registered after ``subscribe`` would miss
+    # it.
+    call_order: list[str] = []
+
+    class _RecordingConfigEntries(_FakeConfigEntries):
+        async def async_forward_entry_setups(self, entry: Any, platforms: list[str]) -> None:
+            call_order.append("forward")
+            await super().async_forward_entry_setups(entry, platforms)
+
+    class _RecordingHass(_FakeSetupHass):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config_entries = _RecordingConfigEntries()
+
+    class _RecordingSubscribeMqtt(_SetupFakeMqtt):
+        async def async_subscribe(self, _hass: Any, topic: str, cb: Callable[..., Any]) -> Callable[[], None]:
+            call_order.append("subscribe")
+            return await super().async_subscribe(_hass, topic, cb)
+
+    # Capture every ``async_dispatcher_send`` call so we can assert the
+    # ``SIGNAL_NEW_METRIC`` dispatch actually happened.
+    dispatched: list[tuple[str, tuple[Any, ...]]] = []
+
+    def _recording_dispatch(_hass: Any, signal: str, *args: Any) -> None:
+        dispatched.append((signal, args))
+
+    fake_mqtt = _RecordingSubscribeMqtt(
+        retained_message=_FakeMqttMessage(topic="telegraf/host-a/cpu", payload=_payload("cpu", "host-a")),
+    )
+    _patch_setup(monkeypatch, fake_mqtt)
+    monkeypatch.setattr(integration, "async_dispatcher_send", _recording_dispatch)
+
+    hass = _RecordingHass()
+    entry = _FakeSetupEntry()
+
+    async def _run() -> None:
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    asyncio.run(_run())
+
+    # The fix: ``forward`` happened strictly before ``subscribe``. The
+    # pre-fix ordering had ``forward`` either missing entirely (a refactor
+    # that drops the platform forward) or after ``subscribe`` -- both
+    # mean the dispatch into an empty listener list was a silent drop.
+    assert "forward" in call_order, (
+        f"setup_ordering_regression: 'forward' was never called during "
+        f"async_setup_entry (call_order={call_order!r}); the production code "
+        f"must call hass.config_entries.async_forward_entry_setups(entry, "
+        f"PLATFORMS) before any MQTT subscription is established so the "
+        f"platform dispatcher listeners are connected before the broker can "
+        f"deliver retained messages."
+    )
+    assert "subscribe" in call_order
+    assert call_order.index("forward") < call_order.index("subscribe"), (
+        f"setup_ordering_regression: forward at index {call_order.index('forward')!r}, "
+        f"subscribe at index {call_order.index('subscribe')!r} (call_order={call_order!r}); "
+        f"forward must strictly precede subscribe so the platform dispatcher "
+        f"listeners are connected before any retained MQTT message can fire "
+        f"SIGNAL_NEW_METRIC into a void of zero listeners."
+    )
+    # The retained message produced a ``SIGNAL_NEW_METRIC`` dispatch and
+    # at least one ``SIGNAL_NEW_DEVICE`` dispatch (the host is new). The
+    # new-metric signal is the one that drives entity creation; the
+    # new-device signal is informational but proves the full chain ran.
+    new_metric_signals = [args for sig, args in dispatched if sig.endswith("_new_metric_entry-1")]
+    new_device_signals = [args for sig, args in dispatched if sig.endswith("_new_device_entry-1")]
+    assert len(new_metric_signals) >= 1, (
+        f"expected at least one SIGNAL_NEW_METRIC dispatch during setup, "
+        f"got: {[s for s, _ in dispatched]}"
+    )
+    assert len(new_device_signals) >= 1
+    # The dispatched metric key matches the new measurement (host = host-a,
+    # measurement = cpu, field = usage_idle). Composite key is
+    # ``{device_id}:{unique_key}`` per the registry contract. The
+    # device_id may carry a short collision-suffix hash (the registry
+    # appends one when a future second device could share the same
+    # host-derived id), so we don't pin the exact slug -- we pin the
+    # ``:cpu_usage_idle`` unique_key and the ``host_a`` prefix.
+    metric_key = new_metric_signals[0][0]
+    assert metric_key.endswith(":cpu_usage_idle"), metric_key
+    assert metric_key.startswith("host_a"), metric_key
+    assert ":" in metric_key, metric_key
+    # Sanity: the metric is in the manager registry, so a platform that
+    # iterated the manager at startup (the existing recovery path) would
+    # have found it too. The test asserts the dispatcher path because
+    # that's the new contract.
+    manager = entry.runtime_data.manager
+    assert manager.get_metric(metric_key) is not None
 
 
 def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
