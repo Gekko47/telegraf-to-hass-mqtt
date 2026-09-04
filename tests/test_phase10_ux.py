@@ -2266,7 +2266,10 @@ def test_check_device_cap_raises_when_dropped(monkeypatch) -> None:
     assert call.kwargs["translation_key"] == "device_cap_reached"
     placeholders = call.kwargs["translation_placeholders"]
     assert placeholders["dropped"] == "5"
-    assert placeholders["max_devices"] == "30"
+    # Phase 11: ``DEFAULT_MAX_DEVICES`` lives in const.py and is the
+    # value the Repairs issue surfaces; pinned here so the constant and
+    # the placeholder stay in lock-step.
+    assert placeholders["max_devices"] == "50"
     assert placeholders["configured_topic"] == "telegraf/#"
 
 
@@ -2331,7 +2334,11 @@ def test_check_metric_cap_raises_when_dropped(monkeypatch) -> None:
     assert call.kwargs["translation_key"] == "metric_cap_reached"
     placeholders = call.kwargs["translation_placeholders"]
     assert placeholders["dropped"] == "12"
-    assert placeholders["max_metrics_per_device"] == "50"
+    # Phase 11: the per-device entity (metric) cap was raised to 1000
+    # so a single host can surface every Telegraf field without being
+    # silently dropped. Pinned here so the constant and the placeholder
+    # stay in lock-step.
+    assert placeholders["max_metrics_per_device"] == "1000"
     assert placeholders["configured_topic"] == "telegraf/rack1/#"
 
 

@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/Gekko47/telegraf-to-hass-mqtt/issues",
   "loggers": ["custom_components.telegraf_mqtt"],
   "requirements": [],
-  "version": "1.3.0"
+  "version": "1.4.0"
 }

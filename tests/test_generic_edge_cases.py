@@ -54,14 +54,28 @@ def test_infer_native_unit_covers_every_branch() -> None:
         "percentage": "%",
         "temp_input": "°C",
         "temp": "°C",
+        "temperature": "°C",
         "bytes_recv": "B",
         "bytes_sent": "B",
+        "read_bytes": "B",
+        "write_bytes": "B",
+        "rx_bytes": "B",
+        "tx_bytes": "B",
         "fan_input": "RPM",
+        "rpm": "RPM",
         "voltage": "V",
         "energy_rate": "W",
         "energy": "Wh",
+        "power": "W",
         "time_to_empty": "h",
         "uptime": "s",
+        "average_response_ms": "ms",
+        "response_time": "s",
+        "level": "dBm",
+        "noise": "dBm",
+        "bitrate": "Mbit/s",
+        "frequency": "MHz",
+        "power_on_hours": "h",
         "something_else": None,
     }
     assert {field: infer_native_unit(field) for field in cases} == cases
@@ -74,6 +88,17 @@ def test_infer_device_class_covers_every_branch() -> None:
     assert infer_device_class("ups", "energy") == "energy"
     assert infer_device_class("battery", "percentage") == "battery"
     assert infer_device_class("cpu", "usage_idle") is None
+    # Phase 11: byte / duration / signal / power additions.
+    assert infer_device_class("mem", "used") == "data_size"
+    assert infer_device_class("diskio", "read_bytes") == "data_size"
+    assert infer_device_class("net", "bytes_recv") == "data_size"
+    assert infer_device_class("swap", "used") == "data_size"
+    assert infer_device_class("system", "uptime") == "duration"
+    assert infer_device_class("ping", "average_response_ms") == "duration"
+    assert infer_device_class("ping", "response_time") == "duration"
+    assert infer_device_class("wireless", "level") == "signal_strength"
+    assert infer_device_class("smart", "temp_c") == "temperature"
+    assert infer_device_class("ipmi_sensor", "value") is None  # unit is a tag, not a field
 
 
 def test_infer_state_class_shape_rules() -> None:
@@ -81,6 +106,63 @@ def test_infer_state_class_shape_rules() -> None:
     assert infer_state_class("usage_idle", 88.4) == "measurement"
     assert infer_state_class("link_up", True) is None
     assert infer_state_class("label", "wifi") is None
+    # Phase 11: byte counters and second-precision durations are counters.
+    assert infer_state_class("read_bytes", 1024) == "total_increasing"
+    assert infer_state_class("write_bytes", 1024) == "total_increasing"
+    assert infer_state_class("rx_bytes", 1024) == "total_increasing"
+    assert infer_state_class("tx_bytes", 1024) == "total_increasing"
+    # Millisecond durations (latency) are gauges.
+    assert infer_state_class("average_response_ms", 23.0) == "measurement"
+    # Swap in/out are byte counters.
+    assert infer_state_class("in", 1024) == "total_increasing"
+    assert infer_state_class("out", 1024) == "total_increasing"
+
+
+def test_infer_state_class_string_and_bool_return_none() -> None:
+    assert infer_state_class("uptime", "string") is None
+    assert infer_state_class("usage_idle", True) is None
+
+
+def test_infer_native_unit_wireless_branches() -> None:
+    """The wireless plugin emits ``link`` (percent) and ``frequency_hz``
+    (Hz); both branch through infer_native_unit. Phase 11 added them; the
+    edge-case test pins the (previously uncovered) fallback lines.
+    """
+    assert infer_native_unit("link") == "%"
+    assert infer_native_unit("link_quality") == "%"
+    assert infer_native_unit("frequency_hz") == "Hz"
+
+
+def test_infer_state_class_bytes_marker_branches() -> None:
+    """Fields whose name carries a byte marker but are not in the
+    hard-coded ``_TOTAL_INCREASING_FIELDS`` set still resolve to
+    ``total_increasing`` via the substring branch. Same for the
+    ``response_time``/``duration_s`` second-precision markers.
+    """
+    # Bytes-by-marker.
+    assert infer_state_class("io_service_bytes_recursive_total", 1) == "total_increasing"
+    # Duration-by-marker, seconds branch.
+    assert infer_state_class("duration_s", 1) == "total_increasing"
+
+
+def test_catchall_docker_payload_handler_is_routed() -> None:
+    """The ``docker`` catch-all handler is the fallback for any docker_*
+    measurement not enumerated as a primary parser (e.g. ``docker_swarm``,
+    ``docker_disk_usage``). Pin it so the dispatcher table is exhaustive.
+    """
+    from custom_components.telegraf_mqtt.parser import TelegrafParser
+
+    handler = TelegrafParser._PARSERS["docker"]
+    payload = {
+        "name": "docker",
+        "tags": {"host": "h1", "container_name": "pihole"},
+        "fields": {"tasks_desired": 3},
+        "timestamp": 1,
+    }
+    descriptors = list(handler(payload))
+    assert len(descriptors) == 1
+    assert descriptors[0].measurement == "docker"
+    assert descriptors[0].field == "tasks_desired"
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +183,32 @@ _MEASUREMENT_HANDLERS = (
     "battery",
     "cpu",
     "disk",
+    "diskio",
+    "docker_container_cpu",
+    "docker_container_mem",
+    "docker_container_net",
+    "docker_container_blkio",
+    "docker_container_status",
+    "http_response",
+    "interrupts",
+    "ipmi_sensor",
+    "kernel",
+    "kernel_vmstat",
     "mem",
     "net",
+    "net_response",
     "nvidia_gpu",
+    "ping",
+    "processes",
     "sensors",
+    "smart",
+    "soft_interrupts",
+    "swap",
+    "system",
+    "wireless",
+    "zfs",
+    "zfs_pool",
+    "zfs_dataset",
     "generic",  # the fallback path
 )
 

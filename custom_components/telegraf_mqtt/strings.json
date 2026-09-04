@@ -138,6 +138,48 @@
       },
       "generic_field": {
         "name": "{field}"
+      },
+      "system_field": {
+        "name": "System {field}"
+      },
+      "kernel_field": {
+        "name": "Kernel {field}"
+      },
+      "processes_field": {
+        "name": "Processes {field}"
+      },
+      "swap_field": {
+        "name": "Swap {field}"
+      },
+      "diskio_field": {
+        "name": "{device} {field}"
+      },
+      "ping_field": {
+        "name": "{url} {field}"
+      },
+      "smart_field": {
+        "name": "{device} {field}"
+      },
+      "wireless_field": {
+        "name": "{interface} {field}"
+      },
+      "docker_field": {
+        "name": "{container} {field}"
+      },
+      "zfs_field": {
+        "name": "{pool} {field}"
+      },
+      "net_response_field": {
+        "name": "{server}:{port} {field}"
+      },
+      "http_response_field": {
+        "name": "{method} {server} {field}"
+      },
+      "interrupts_field": {
+        "name": "{irq} {field}"
+      },
+      "ipmi_field": {
+        "name": "{name} {field}"
       }
     },
     "binary_sensor": {
@@ -170,6 +212,48 @@
       },
       "generic_field": {
         "name": "{field}"
+      },
+      "system_field": {
+        "name": "System {field}"
+      },
+      "kernel_field": {
+        "name": "Kernel {field}"
+      },
+      "processes_field": {
+        "name": "Processes {field}"
+      },
+      "swap_field": {
+        "name": "Swap {field}"
+      },
+      "diskio_field": {
+        "name": "{device} {field}"
+      },
+      "ping_field": {
+        "name": "{url} {field}"
+      },
+      "smart_field": {
+        "name": "{device} {field}"
+      },
+      "wireless_field": {
+        "name": "{interface} {field}"
+      },
+      "docker_field": {
+        "name": "{container} {field}"
+      },
+      "zfs_field": {
+        "name": "{pool} {field}"
+      },
+      "net_response_field": {
+        "name": "{server}:{port} {field}"
+      },
+      "http_response_field": {
+        "name": "{method} {server} {field}"
+      },
+      "interrupts_field": {
+        "name": "{irq} {field}"
+      },
+      "ipmi_field": {
+        "name": "{name} {field}"
       }
     }
   }

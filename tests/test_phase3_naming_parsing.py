@@ -63,15 +63,21 @@ EXPECTED_NAMING: dict[str, list[tuple[str, str, str | None, str | None, str | No
     "cpu": [("usage_idle", "CPU Usage Idle", None, None, None)],
     "mem": [
         ("used_percent", "Memory Used Percent", "%", None, None),
-        ("used", "Memory Used", None, None, None),
+        # Phase 11: ``mem.used`` is documented as bytes in Telegraf's
+        # mem plugin, so the per-measurement byte override assigns
+        # ``data_size`` / ``B`` to it.
+        ("used", "Memory Used", "B", "data_size", None),
     ],
     "disk": [
         ("used_percent", "Disk Root Used Percent", "%", None, "diagnostic"),
-        ("free", "Disk Root Free", None, None, "diagnostic"),
+        # Phase 11: same per-measurement byte override applies to disk.
+        ("free", "Disk Root Free", "B", "data_size", "diagnostic"),
     ],
     "net": [
-        ("bytes_recv", "wlan0 Bytes Received", "B", None, None),
-        ("bytes_sent", "wlan0 Bytes Sent", "B", None, None),
+        # Phase 11: byte counters now also resolve to ``data_size`` so HA
+        # picks the right unit-conversion + sparkline colours.
+        ("bytes_recv", "wlan0 Bytes Received", "B", "data_size", None),
+        ("bytes_sent", "wlan0 Bytes Sent", "B", "data_size", None),
     ],
     "sensors": [("temp_input", "CPU Package Temperature", "\u00b0C", "temperature", None)],
     "nvidia_gpu": [

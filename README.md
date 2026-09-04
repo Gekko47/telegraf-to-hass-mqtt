@@ -157,12 +157,22 @@ Common measurement names and the Telegraf input plugin they typically come from:
 | `cpu` | `cpu` | `cpu-total` aggregates the whole CPU; per-core metrics arrive when per-CPU reporting is enabled. |
 | `mem` | `mem` | Percentage fields are state class `measurement`; byte counts are `total_increasing`. |
 | `disk` | `disk` | Whole measurement is diagnostic. The root disk is rendered as `Disk Root <field>`. |
-| `diskio` | `diskio` | Counters. |
+| `diskio` | `diskio` | Per-device I/O counters; `read_bytes` / `write_bytes` render as `7.38 GB` via the `data_size` device class. |
 | `net` | `net` | Disambiguated by the `interface` tag. |
 | `sensors` | `lm_sensors` | Disambiguated by `chip` + `feature`. CPU package temperature is rendered as `CPU Package Temperature`. |
-| `system` | `system` | `n_cpus`, `n_users`, `uptime_format` are static identity. |
+| `system` | `system` | `n_cpus`, `n_users`, `uptime_format` are static identity; `load1`/`load5`/`load15` round to two decimals; `uptime` is `total_increasing` / `duration`. |
+| `kernel` / `kernel_vmstat` | `kernel` (legacy) / `kernel_vmstat` (modern) | Counters and gauges from `/proc/vmstat` and friends. |
 | `processes` | `processes` | Process counts, always diagnostic. |
-| `swap` | `swap` | Similar shape to `mem`. |
+| `swap` | `swap` | Similar shape to `mem`; `in` / `out` are byte counters. |
+| `ping` | `ping` | `*_response_ms` fields render as `9.5 ms` / `123 ms` (adaptive precision). |
+| `smart` | `smart` | Per-device S.M.A.R.T. attributes; `temp_c` is temperature, `power_on_hours` is duration. |
+| `docker` / `docker_container_*` | `docker` | Per-container metrics; entity names include the container name. |
+| `wireless` | `wireless` | `level` / `noise` are `dBm`; packet counters are `total_increasing`. |
+| `zfs` / `zfs_pool` / `zfs_dataset` | `zfs` | Pool + dataset metrics; entity names include the pool / dataset. |
+| `net_response` | `net_response` | TCP / UDP response time + success code. |
+| `http_response` | `http_response` | HTTP response time + status code. |
+| `ipmi_sensor` | `ipmi_sensor` | Per-sensor BMC metrics; the `unit` tag drives the device class. |
+| `interrupts` / `soft_interrupts` | `interrupts` | Per-IRQ counters from `/proc/interrupts`. |
 | `nvidia_gpu` | `nvidia-smi` (via Telegraf's exec input) | Field names vary by exec script. |
 | `battery` | `exec`/`upower` (custom) | Field names vary. |
 

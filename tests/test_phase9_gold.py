@@ -211,6 +211,90 @@ def test_resolve_translation_unknown_measurement_falls_back_to_generic() -> None
     assert placeholders == {"field": "Watts"}
 
 
+# Phase 11 -- new measurement translation keys. Each pins the
+# per-measurement template so a future refactor cannot silently change
+# the user-visible name without the test suite catching it.
+
+
+def test_resolve_translation_phase11_simple_measurements() -> None:
+    """The simple ``{measurement} {field}`` templates."""
+    for measurement, expected_key in (
+        ("system", "system_field"),
+        ("kernel", "kernel_field"),
+        ("kernel_vmstat", "kernel_field"),
+        ("processes", "processes_field"),
+        ("swap", "swap_field"),
+    ):
+        key, placeholders = resolve_translation(measurement, {"host": "h"}, "x")
+        assert key == expected_key, measurement
+        assert placeholders == {"field": "X"}
+
+
+def test_resolve_translation_phase11_tagged_measurements() -> None:
+    """The per-tag templates (device / container / pool / interface)."""
+    cases = [
+        # (measurement, tags, field, expected_key, expected_placeholder, expected_value, expected_field)
+        ("diskio", {"host": "h", "name": "sda"}, "read_bytes", "diskio_field", "device", "sda", "Read Bytes"),
+        ("ping", {"host": "h", "url": "example.org"}, "average_response_ms", "ping_field", "url", "example.org", "Average Response Ms"),
+        ("smart", {"host": "h", "device": "sda"}, "temp_c", "smart_field", "device", "sda", "Temp C"),
+        ("wireless", {"host": "h", "interface": "wlan0"}, "level", "wireless_field", "interface", "wlan0", "Level"),
+        ("docker_container_cpu", {"host": "h", "container_name": "pihole"}, "usage_percent", "docker_field", "container", "pihole", "Usage Percent"),
+        ("docker_container_mem", {"host": "h", "container_name": "pihole"}, "usage", "docker_field", "container", "pihole", "Usage"),
+        ("zfs_pool", {"host": "h", "pool": "zroot"}, "allocated", "zfs_field", "pool", "zroot", "Allocated"),
+        ("zfs_dataset", {"host": "h", "dataset": "zata"}, "avail", "zfs_field", "pool", "zata", "Avail"),
+        ("interrupts", {"host": "h", "irq": "0"}, "count", "interrupts_field", "irq", "0", "Count"),
+        ("soft_interrupts", {"host": "h", "irq": "NET_RX"}, "count", "interrupts_field", "irq", "NET_RX", "Count"),
+        ("ipmi_sensor", {"host": "h", "name": "fan_1"}, "value", "ipmi_field", "name", "fan_1", "Value"),
+    ]
+    for measurement, tags, field, expected_key, ph_name, ph_value, expected_field in cases:
+        key, placeholders = resolve_translation(measurement, tags, field)
+        assert key == expected_key, measurement
+        assert placeholders == {ph_name: ph_value, "field": expected_field}, measurement
+
+
+def test_resolve_translation_phase11_response_measurements() -> None:
+    """The net_response / http_response templates use {server}/{port}/{method}."""
+    key, placeholders = resolve_translation(
+        "net_response", {"host": "h", "server": "localhost", "port": "8086"}, "response_time"
+    )
+    assert key == "net_response_field"
+    assert placeholders == {"server": "localhost", "port": "8086", "field": "Response Time"}
+
+    key, placeholders = resolve_translation(
+        "http_response", {"host": "h", "server": "http://github.com", "method": "GET"}, "response_time"
+    )
+    assert key == "http_response_field"
+    assert placeholders == {"server": "http://github.com", "method": "GET", "field": "Response Time"}
+
+
+def test_resolve_translation_phase11_tagged_with_missing_tag_uses_empty() -> None:
+    """A measurement that needs a disambiguator but the tag is missing
+    still resolves to the tagged key with an empty placeholder --
+    ``format_translation`` trims the leading separator.
+    """
+    key, placeholders = resolve_translation("diskio", {"host": "h"}, "reads")
+    assert key == "diskio_field"
+    assert placeholders == {"device": "", "field": "Reads"}
+
+    key, placeholders = resolve_translation("docker_container_cpu", {"host": "h"}, "usage_percent")
+    assert key == "docker_field"
+    assert placeholders == {"container": "", "field": "Usage Percent"}
+
+
+def test_format_translation_phase11_tagged_renders_cleanly() -> None:
+    """Empty leading segment is stripped, mirroring the network_field contract."""
+    from custom_components.telegraf_mqtt.translations_strings import format_translation
+
+    assert format_translation("diskio_field", {"device": "sda", "field": "Read Bytes"}) == "sda Read Bytes"
+    assert format_translation("diskio_field", {"device": "", "field": "Read Bytes"}) == "Read Bytes"
+    assert format_translation("docker_field", {"container": "pihole", "field": "Usage"}) == "pihole Usage"
+    assert format_translation("docker_field", {"container": "", "field": "Usage"}) == "Usage"
+    assert (
+        format_translation("net_response_field", {"server": "localhost", "port": "8086", "field": "Response Time"})
+        == "localhost:8086 Response Time"
+    )
+
+
 def test_format_translation_renders_all_reference_payload_names() -> None:
     """The translation tables produce the user-facing display names for the
     SPEC.md reference payloads."""
@@ -392,20 +476,36 @@ def test_icon_lookup_table_covers_every_inferred_key() -> None:
         ICON_KEY_BINARY,
         ICON_KEY_CPU,
         ICON_KEY_DISK,
+        ICON_KEY_DISKIO,
+        ICON_KEY_DOCKER,
         ICON_KEY_ENERGY,
         ICON_KEY_FAN,
+        ICON_KEY_GENERIC,
+        ICON_KEY_HTTP_RESPONSE,
+        ICON_KEY_INTERRUPTS,
+        ICON_KEY_IPMI,
+        ICON_KEY_KERNEL,
         ICON_KEY_MEMORY,
+        ICON_KEY_NET_RESPONSE,
         ICON_KEY_NETWORK,
         ICON_KEY_PERCENTAGE,
+        ICON_KEY_PING,
         ICON_KEY_POWER,
+        ICON_KEY_PROCESSES,
+        ICON_KEY_SMART,
+        ICON_KEY_SWAP,
+        ICON_KEY_SYSTEM,
         ICON_KEY_TEMPERATURE,
         ICON_KEY_VOLTAGE,
+        ICON_KEY_WIRELESS,
+        ICON_KEY_ZFS,
     )
 
     for key in (
         ICON_KEY_CPU,
         ICON_KEY_MEMORY,
         ICON_KEY_DISK,
+        ICON_KEY_DISKIO,
         ICON_KEY_NETWORK,
         ICON_KEY_TEMPERATURE,
         ICON_KEY_VOLTAGE,
@@ -416,6 +516,20 @@ def test_icon_lookup_table_covers_every_inferred_key() -> None:
         ICON_KEY_PERCENTAGE,
         ICON_KEY_BINARY,
         ICON_KEY_GENERIC,
+        # Phase 11 -- per-measurement icons.
+        ICON_KEY_SYSTEM,
+        ICON_KEY_KERNEL,
+        ICON_KEY_PROCESSES,
+        ICON_KEY_SWAP,
+        ICON_KEY_PING,
+        ICON_KEY_SMART,
+        ICON_KEY_WIRELESS,
+        ICON_KEY_DOCKER,
+        ICON_KEY_ZFS,
+        ICON_KEY_NET_RESPONSE,
+        ICON_KEY_HTTP_RESPONSE,
+        ICON_KEY_INTERRUPTS,
+        ICON_KEY_IPMI,
     ):
         assert key in ICON_FOR_KEY, key
         assert ICON_FOR_KEY[key].startswith("mdi:"), key

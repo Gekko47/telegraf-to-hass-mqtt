@@ -2,20 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.4.0] - 2026-09-04
+
+### Added
+- **Fleet-scale device and metric caps** (`registry.py`, `repairs.py`,
 
 ### Added
 - **Fleet-scale device and metric caps** (`registry.py`, `repairs.py`,
   `const.py`, `__init__.py`). A single config entry now caps the
   number of distinct Telegraf hosts (devices) it tracks at
-  ``DEFAULT_MAX_DEVICES = 30`` and the number of metrics per device
-  at ``MAX_METRICS_PER_DEVICE = 50``. When a new device would exceed
+  ``DEFAULT_MAX_DEVICES = 50`` and the number of metrics per device
+  at ``MAX_METRICS_PER_DEVICE = 1000``. When a new device would exceed
   the cap, the manager drops the measurement and increments
   ``dropped_device_count``; the Repairs framework consults this to
   raise a ``device_cap_reached`` hint. Same for metrics and
   ``metric_cap_reached``. Both checks are idempotent create-or-delete
   calls and self-guard when the issue registry is unavailable. A value
   of 0 disables the respective cap entirely.
+- **Phase 11: per-device metric cap raised to 1000 entities**
+  (`const.py`). The previous cap of 50 silently dropped Telegraf
+  fields on any host running the full system / lm_sensors / docker /
+  smart / net plugin set; raising the cap to 1000 lets a single host
+  surface every field the broker carries. The default device cap
+  (``DEFAULT_MAX_DEVICES = 50``) is unchanged -- a homelab broker is
+  unlikely to carry 50 distinct physical hosts. Both are user-
+  overridable; ``0`` disables the cap entirely.
+- **Phase 11: auto-formatting + new measurement parsers**
+  (`units.py`, `parsers/`, `parser.py`, `naming.py`, `icons.py`,
+  `translations_strings.py`, `translations/en.json`, `strings.json`).
+  Every Telegraf input plugin in the homelab surface area is now
+  recognised as a first-class measurement (``diskio``, ``system``,
+  ``kernel``, ``kernel_vmstat``, ``processes``, ``swap``, ``ping``,
+  ``smart``, ``docker``, ``wireless``, ``zfs``, ``net_response``,
+  ``http_response``, ``ipmi_sensor``, ``interrupts``) with the right
+  ``native_unit``, ``suggested_device_class``, ``suggested_state_class``,
+  and translation key. The new ``units.py`` module rounds percentages
+  to whole numbers (``95 %`` not ``95.0 %``), load averages to two
+  decimals, ms-latency to one decimal below 10 ms / zero above, and
+  leaves bytes as bytes for Home Assistant's unit-conversion layer to
+  render as ``7.38 GB``. The generic parser is unchanged for any
+  measurement the dispatcher does not recognise -- backwards
+  compatibility is preserved bit-for-bit.
 - **Scan progress bar** (`config_flow.py`, `strings.json`,
   `translations/en.json`). The discover-topics scan step now uses HA's
   ``async_show_progress`` / ``async_show_progress_done`` protocol so

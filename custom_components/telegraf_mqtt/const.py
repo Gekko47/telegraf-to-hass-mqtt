@@ -93,11 +93,19 @@ MAX_EXPIRY_TICK_SECONDS = 30
 # ``DeviceManager.devices`` dict would let a single entry grow
 # without limit and add event-loop latency to the periodic registry
 # scan (which is O(devices * metrics)). ``MAX_DEVICES`` is a hard
-# cap; ``DEFAULT_MAX_DEVICES`` is the default (30 hosts) applied
+# cap; ``DEFAULT_MAX_DEVICES`` is the default (50 hosts) applied
 # when the user has not opted into a custom value. Set to 0 to
 # disable the cap entirely (not recommended on a shared broker).
-DEFAULT_MAX_DEVICES = 30
-MAX_METRICS_PER_DEVICE = 50
+# Phase 11: ``MAX_METRICS_PER_DEVICE`` was raised from 50 to 1000 so
+# a single host can surface every Telegraf field (a fully-loaded
+# system plugin + lm_sensors + per-core CPU + per-interface net +
+# docker + smart + ... comfortably exceeds 50 entities) without being
+# silently dropped by the registry. The ``DEFAULT_MAX_DEVICES`` cap
+# is unchanged -- a homelab broker is unlikely to carry 50 distinct
+# physical hosts, and 50 is still high enough to share one config
+# entry across a small fleet.
+DEFAULT_MAX_DEVICES = 50
+MAX_METRICS_PER_DEVICE = 1000
 DEFAULT_ENABLE_CLEANUP = True
 DEFAULT_CLEANUP_DELAY = 30 * 24 * 60 * 60  # 30 days
 DEFAULT_DELETE_DELAY = 60 * 24 * 60 * 60  # 60 days

@@ -107,3 +107,30 @@ def test_infer_icon_key_measurement_fallback() -> None:
     assert infer_icon_key("net", "bytes_recv") == "network"
     assert infer_icon_key("battery", "state") == "battery"
     assert infer_icon_key("custom", "field") == "generic"
+
+
+def test_infer_icon_key_phase11_per_measurement() -> None:
+    """Phase 11 -- one icon key per new measurement so the UI shows the
+    right Material Design Icon for every entity.
+    """
+    # One icon per primary measurement.
+    assert infer_icon_key("system", "uptime") == "system"
+    assert infer_icon_key("kernel", "interrupts") == "kernel"
+    assert infer_icon_key("kernel_vmstat", "pgpgin") == "kernel"
+    assert infer_icon_key("processes", "total") == "processes"
+    assert infer_icon_key("swap", "used") == "swap"
+    assert infer_icon_key("diskio", "read_bytes") == "diskio"
+    assert infer_icon_key("ping", "average_response_ms") == "ping"
+    assert infer_icon_key("smart", "temp_c") == "smart"
+    assert infer_icon_key("wireless", "level") == "wireless"
+    assert infer_icon_key("docker_container_cpu", "usage_total") == "docker"
+    assert infer_icon_key("docker_container_mem", "usage") == "docker"
+    assert infer_icon_key("docker_swarm", "tasks_desired") == "docker"
+    assert infer_icon_key("zfs", "arcstats_size") == "zfs"
+    assert infer_icon_key("zfs_pool", "allocated") == "zfs"
+    assert infer_icon_key("zfs_dataset", "used") == "zfs"
+    assert infer_icon_key("net_response", "response_time") == "net_response"
+    assert infer_icon_key("http_response", "response_time") == "http_response"
+    assert infer_icon_key("interrupts", "count") == "interrupts"
+    assert infer_icon_key("soft_interrupts", "count") == "interrupts"
+    assert infer_icon_key("ipmi_sensor", "value") == "ipmi"

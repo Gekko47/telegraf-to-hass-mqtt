@@ -81,6 +81,26 @@ ALLOWED_COMBOS: frozenset[tuple[str | None, str | None, str | None]] = frozenset
         # the recorder's state_class validation, but the allowlist still
         # has to permit the tuple so the parametrize test stays green.
         (None, None, None),
+        # Phase 11 -- byte counters with the data_size device_class. HA's
+        # recorder accepts ``data_size`` + ``total_increasing`` (see
+        # ``SensorDeviceClass.DATA_SIZE`` in HA core). Drives the
+        # "7.38 GB" rendering for ``mem.used`` / ``diskio.read_bytes`` /
+        # ``swap.used`` / etc.
+        ("data_size", "total_increasing", "B"),
+        # Phase 11 -- byte gauges (e.g. ``mem.used``, ``disk.free``) carry
+        # the same data_size device class but the state class is
+        # ``measurement`` (gauge) because the value is a current snapshot,
+        # not a counter.
+        ("data_size", "measurement", "B"),
+        # Phase 11 -- uptime rendered as a duration. Lets the recorder /
+        # UI render the seconds-as-duration form for ``system.uptime``.
+        ("duration", "total_increasing", "s"),
+        # Phase 11 -- ms-precision duration fields (ping, net_response,
+        # http_response). These are gauges, not counters, so the state
+        # class is "measurement".
+        ("duration", "measurement", "ms"),
+        # Phase 11 -- wireless signal_strength (dBm). Gauges.
+        ("signal_strength", "measurement", "dBm"),
     }
 )
 
@@ -143,11 +163,16 @@ def _combination_for(
     measurement: str, field: str, value: float | int | bool = 1
 ) -> tuple[str | None, str | None, str | None]:
     """Resolve the (device_class, state_class, native_unit) combination the
-    pipeline will assign for a (measurement, field) pair."""
+    pipeline will assign for a (measurement, field) pair.
+
+    Phase 11: ``infer_native_unit`` takes the measurement so the
+    per-measurement byte override (``mem.used`` -> ``B``) kicks in here
+    too, mirroring the parser's call site.
+    """
     return (
         infer_device_class(measurement, field),
         infer_state_class(field, value),
-        infer_native_unit(field),
+        infer_native_unit(field, measurement),
     )
 
 
@@ -224,6 +249,25 @@ def test_no_premature_byte_conversion_in_pipeline_source() -> None:
         "custom_components.telegraf_mqtt.binary_sensor",
         "custom_components.telegraf_mqtt.heuristics",
         "custom_components.telegraf_mqtt.naming",
+        "custom_components.telegraf_mqtt.units",
+        # Phase 11 -- the new per-measurement parsers all delegate to
+        # ``parse_generic_payload`` (or are pure functions), so the
+        # audit applies to them identically.
+        "custom_components.telegraf_mqtt.parsers.system",
+        "custom_components.telegraf_mqtt.parsers.kernel",
+        "custom_components.telegraf_mqtt.parsers.kernel_vmstat",
+        "custom_components.telegraf_mqtt.parsers.processes",
+        "custom_components.telegraf_mqtt.parsers.swap",
+        "custom_components.telegraf_mqtt.parsers.diskio",
+        "custom_components.telegraf_mqtt.parsers.ping",
+        "custom_components.telegraf_mqtt.parsers.smart",
+        "custom_components.telegraf_mqtt.parsers.docker",
+        "custom_components.telegraf_mqtt.parsers.wireless",
+        "custom_components.telegraf_mqtt.parsers.zfs",
+        "custom_components.telegraf_mqtt.parsers.net_response",
+        "custom_components.telegraf_mqtt.parsers.http_response",
+        "custom_components.telegraf_mqtt.parsers.ipmi_sensor",
+        "custom_components.telegraf_mqtt.parsers.interrupts",
     ]
     violations: list[str] = []
     for module_name in modules:
