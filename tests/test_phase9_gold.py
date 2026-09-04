@@ -235,19 +235,43 @@ def test_resolve_translation_phase11_tagged_measurements() -> None:
     cases = [
         # (measurement, tags, field, expected_key, expected_placeholder, expected_value, expected_field)
         ("diskio", {"host": "h", "name": "sda"}, "read_bytes", "diskio_field", "device", "sda", "Read Bytes"),
-        ("ping", {"host": "h", "url": "example.org"}, "average_response_ms", "ping_field", "url", "example.org", "Average Response Ms"),
+        (
+            "ping",
+            {"host": "h", "url": "example.org"},
+            "average_response_ms",
+            "ping_field",
+            "url",
+            "example.org",
+            "Average Response Ms",
+        ),
         ("smart", {"host": "h", "device": "sda"}, "temp_c", "smart_field", "device", "sda", "Temp C"),
         ("wireless", {"host": "h", "interface": "wlan0"}, "level", "wireless_field", "interface", "wlan0", "Level"),
-        ("docker_container_cpu", {"host": "h", "container_name": "pihole"}, "usage_percent", "docker_field", "container", "pihole", "Usage Percent"),
-        ("docker_container_mem", {"host": "h", "container_name": "pihole"}, "usage", "docker_field", "container", "pihole", "Usage"),
+        (
+            "docker_container_cpu",
+            {"host": "h", "container_name": "pihole"},
+            "usage_percent",
+            "docker_field",
+            "container",
+            "pihole",
+            "Usage Percent",
+        ),
+        (
+            "docker_container_mem",
+            {"host": "h", "container_name": "pihole"},
+            "usage",
+            "docker_field",
+            "container",
+            "pihole",
+            "Usage",
+        ),
         ("zfs_pool", {"host": "h", "pool": "zroot"}, "allocated", "zfs_field", "pool", "zroot", "Allocated"),
         ("zfs_dataset", {"host": "h", "dataset": "zata"}, "avail", "zfs_field", "pool", "zata", "Avail"),
         ("interrupts", {"host": "h", "irq": "0"}, "count", "interrupts_field", "irq", "0", "Count"),
         ("soft_interrupts", {"host": "h", "irq": "NET_RX"}, "count", "interrupts_field", "irq", "NET_RX", "Count"),
         ("ipmi_sensor", {"host": "h", "name": "fan_1"}, "value", "ipmi_field", "name", "fan_1", "Value"),
     ]
-    for measurement, tags, field, expected_key, ph_name, ph_value, expected_field in cases:
-        key, placeholders = resolve_translation(measurement, tags, field)
+    for measurement, tags, field_name, expected_key, ph_name, ph_value, expected_field in cases:
+        key, placeholders = resolve_translation(measurement, tags, field_name)
         assert key == expected_key, measurement
         assert placeholders == {ph_name: ph_value, "field": expected_field}, measurement
 
@@ -480,7 +504,6 @@ def test_icon_lookup_table_covers_every_inferred_key() -> None:
         ICON_KEY_DOCKER,
         ICON_KEY_ENERGY,
         ICON_KEY_FAN,
-        ICON_KEY_GENERIC,
         ICON_KEY_HTTP_RESPONSE,
         ICON_KEY_INTERRUPTS,
         ICON_KEY_IPMI,

@@ -24,7 +24,6 @@ import pytest
 
 from custom_components.telegraf_mqtt.units import format_precision, format_value
 
-
 # ---------------------------------------------------------------------------
 # format_precision: number of decimals / rounding behaviour per unit
 # ---------------------------------------------------------------------------

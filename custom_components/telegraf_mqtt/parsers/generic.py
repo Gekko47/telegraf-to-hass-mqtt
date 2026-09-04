@@ -327,10 +327,7 @@ def _is_byte_field(measurement: str, field: str) -> bool:
 def _is_duration_field(measurement: str, field: str) -> bool:
     """Return True when a field is a duration / latency."""
     field_lower = field.lower()
-    return any(
-        marker in field_lower
-        for marker in (*_MS_FIELD_MARKERS, *_SECONDS_FIELD_MARKERS)
-    )
+    return any(marker in field_lower for marker in (*_MS_FIELD_MARKERS, *_SECONDS_FIELD_MARKERS))
 
 
 def _slugify(value: str) -> str:

@@ -141,9 +141,8 @@ def _is_dollar_topic_disjoint(a_parts: list[str], b_parts: list[str]) -> bool:
     leading-wildcard filter can never overlap a ``$``-prefixed
     filter.
     """
-    return (
-        (_is_dollar_prefixed(a_parts) and _is_leading_wildcard(b_parts))
-        or (_is_dollar_prefixed(b_parts) and _is_leading_wildcard(a_parts))
+    return (_is_dollar_prefixed(a_parts) and _is_leading_wildcard(b_parts)) or (
+        _is_dollar_prefixed(b_parts) and _is_leading_wildcard(a_parts)
     )
 
 

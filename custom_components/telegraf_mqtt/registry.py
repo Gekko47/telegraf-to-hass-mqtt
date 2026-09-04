@@ -216,9 +216,7 @@ class MetricRegistry:
             self._field_overrides = field_overrides
             self._reapply_overrides_and_emit(on_write)
 
-    def _reapply_overrides_and_emit(
-        self, on_write: Callable[[str, bool, Any], None] | None
-    ) -> None:
+    def _reapply_overrides_and_emit(self, on_write: Callable[[str, bool, Any], None] | None) -> None:
         """Rebuild every cached descriptor and emit state changes.
 
         Used when ``field_overrides`` or ``category_overrides`` change:
@@ -235,9 +233,7 @@ class MetricRegistry:
             if on_write is not None:
                 on_write(unique_key, state.is_available, state.value)
 
-    def _mark_excluded_metrics_unavailable(
-        self, on_write: Callable[[str, bool, Any], None] | None
-    ) -> None:
+    def _mark_excluded_metrics_unavailable(self, on_write: Callable[[str, bool, Any], None] | None) -> None:
         """Flip every newly-excluded metric to unavailable and emit the change.
 
         Exclusion is a state transition: a metric that matches a new
@@ -376,12 +372,8 @@ class MetricRegistry:
         current = self._states.get(raw_descriptor.unique_key)
         current_time = self._clock()
         if current is None:
-            return self._register_new_metric(
-                raw_descriptor, descriptor, metric_key, on_discovered, on_write
-            )
-        return self._refresh_existing_metric(
-            raw_descriptor, descriptor, current, current_time, metric_key, on_write
-        )
+            return self._register_new_metric(raw_descriptor, descriptor, metric_key, on_discovered, on_write)
+        return self._refresh_existing_metric(raw_descriptor, descriptor, current, current_time, metric_key, on_write)
 
     def _drop_metric_on_platform_none(
         self,

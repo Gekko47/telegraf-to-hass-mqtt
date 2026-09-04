@@ -509,11 +509,13 @@ def _make_scan_flow() -> tuple[TelegrafMqttConfigFlow, list[dict[str, Any]], lis
     # only works inside a coroutine, so the scan-pipeline tests arm the
     # fake loop inside their ``_run()`` before starting the step task.
     flow.hass = type("H", (), {})()  # type: ignore[assignment]
+
     # ``async_create_task`` runs the coroutine on the running loop and
     # returns a task. We wrap it so the test can introspect the task
     # and force it to completion.
     def _create_task(coro: Any) -> asyncio.Task[Any]:
         return asyncio.ensure_future(coro)
+
     flow.hass.async_create_task = _create_task  # type: ignore[attr-defined]
     return flow, forms, unload_hooks
 

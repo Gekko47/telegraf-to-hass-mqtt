@@ -148,9 +148,7 @@ def resolve_translation(measurement: str, tags: Mapping[str, str], field: str) -
     return TK_GENERIC_FIELD, {"field": display_field}
 
 
-def _translation_disk(
-    tag_map: dict[str, str], display_field: str
-) -> tuple[str, dict[str, str]] | None:
+def _translation_disk(tag_map: dict[str, str], display_field: str) -> tuple[str, dict[str, str]] | None:
     """Disk measurements: root path is a special template."""
     path = tag_map.get("path")
     if path == "/":
@@ -158,9 +156,7 @@ def _translation_disk(
     return TK_DISK_FIELD, {"field": display_field}
 
 
-def _translation_sensors(
-    tag_map: dict[str, str], display_field: str
-) -> tuple[str, dict[str, str]] | None:
+def _translation_sensors(tag_map: dict[str, str], display_field: str) -> tuple[str, dict[str, str]] | None:
     """Sensors: coretemp package_id_0 is the CPU package temperature."""
     chip = tag_map.get("chip", "").lower()
     feature = tag_map.get("feature", "").lower()
@@ -169,9 +165,7 @@ def _translation_sensors(
     return TK_SENSOR_FIELD, {"field": display_field}
 
 
-def _translation_net(
-    tag_map: dict[str, str], display_field: str
-) -> tuple[str, dict[str, str]] | None:
+def _translation_net(tag_map: dict[str, str], display_field: str) -> tuple[str, dict[str, str]] | None:
     """Network measurements: include the interface tag when present."""
     interface = tag_map.get("interface", "")
     if interface:
@@ -182,9 +176,7 @@ def _translation_net(
     return TK_NETWORK_FIELD, {"field": display_field, "interface": ""}
 
 
-def _translation_simple(
-    translation_key: str, display_field: str
-) -> tuple[str, dict[str, str]]:
+def _translation_simple(translation_key: str, display_field: str) -> tuple[str, dict[str, str]]:
     """Measurements whose template is just the field name."""
     return translation_key, {"field": display_field}
 

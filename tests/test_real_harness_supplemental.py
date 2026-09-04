@@ -106,8 +106,7 @@ async def test_retained_message_during_subscribe_reaches_platforms_real(
     domain_entries = [e for e in entity_registry.entities.values() if e.platform == DOMAIN]
     unique_ids = {e.unique_id for e in domain_entries}
     assert "telegraf_mqtt_retained_host_cpu_usage_idle" in unique_ids, (
-        f"entity registry is missing the retained-message entity; "
-        f"got unique_ids={unique_ids!r}"
+        f"entity registry is missing the retained-message entity; got unique_ids={unique_ids!r}"
     )
     state = hass.states.get("sensor.retained_host_cpu_usage_idle")
     assert state is not None
@@ -200,5 +199,3 @@ async def test_options_flow_applies_category_overrides_glob_live_real(
     state_after = hass.states.get(cpu_entity_id)
     assert state_after is not None
     assert state_after.state == "42.0"
-
-

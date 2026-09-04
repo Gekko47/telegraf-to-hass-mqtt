@@ -1523,8 +1523,7 @@ def test_retained_message_during_subscribe_reaches_platforms(
     new_metric_signals = [args for sig, args in dispatched if sig.endswith("_new_metric_entry-1")]
     new_device_signals = [args for sig, args in dispatched if sig.endswith("_new_device_entry-1")]
     assert len(new_metric_signals) >= 1, (
-        f"expected at least one SIGNAL_NEW_METRIC dispatch during setup, "
-        f"got: {[s for s, _ in dispatched]}"
+        f"expected at least one SIGNAL_NEW_METRIC dispatch during setup, got: {[s for s, _ in dispatched]}"
     )
     assert len(new_device_signals) >= 1
     # The dispatched metric key matches the new measurement (host = host-a,
@@ -1544,7 +1543,6 @@ def test_retained_message_during_subscribe_reaches_platforms(
     # that's the new contract.
     manager = entry.runtime_data.manager
     assert manager.get_metric(metric_key) is not None
-
 
 
 def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
