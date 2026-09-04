@@ -69,11 +69,26 @@ show_missing = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Pin the asyncio fixture loop scope explicitly. pytest-asyncio is flipping
+# the implicit default to "function" in an upcoming release; setting it here
+# both silences its PytestDeprecationWarning about the unset option and
+# locks the scope so a future pytest-asyncio upgrade cannot silently
+# change fixture caching behavior across the suite.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "ignore::DeprecationWarning:homeassistant.*",
     "ignore::DeprecationWarning:voluptuous.*",
     "ignore::DeprecationWarning:backoff.*",
     "ignore::PendingDeprecationWarning",
+    # Upstream test-plugin noise -- not a DeprecationWarning, so the
+    # ``ignore::DeprecationWarning:homeassistant.*`` rule does not catch
+    # it. Narrowly scoped to the aiohttp key-class hint from HA core.
+    "ignore:It is recommended to use web.AppKey instances for keys.:homeassistant.components.http",
+    # pytest-asyncio emits PytestDeprecationWarning (a separate class from
+    # DeprecationWarning) for unset configuration options and upcoming
+    # default changes. Silencing the class keeps our own code fully visible
+    # to the DeprecationWarning surface while quieting framework notices.
+    "ignore::pytest.PytestDeprecationWarning",
 ]
 markers = [
     "asyncio: mark test as async (auto-applied by pytest-asyncio).",

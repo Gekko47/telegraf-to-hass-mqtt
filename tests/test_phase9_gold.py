@@ -737,13 +737,20 @@ def test_reconfigure_flow_aborts_on_duplicate_topic(monkeypatch) -> None:
 
     update_called: list[bool] = []
 
-    async def fake_update(*args, **kwargs):
+    def fake_update(*args, **kwargs):
         # Record invocation only. Do NOT call async_set_unique_id here --
         # async_step_reconfigure is the sole source of that call, which we
-        # verify via the called_with assertion below.
+        # verify via the called_with assertion below. ``async def`` would
+        # produce an unawaited-coroutine RuntimeWarning because this stub
+        # is only patched in as a tripwire -- the abort path must not
+        # reach it. A sync stub still gets invoked through HA's
+        # ``await async_update_reload_and_abort(...)`` call site, and
+        # records the same side effect.
         update_called.append(True)
 
     monkeypatch.setattr(flow, "async_update_reload_and_abort", fake_update)
+
+    assert update_called == []  # tripwire: must not run on the abort path
 
     import asyncio
 
