@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # HA 2026.6.x requires CPython >=3.14.2 (homeassistant Requires-Python).
           python-version: '3.14'
