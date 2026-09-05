@@ -101,6 +101,18 @@ ALLOWED_COMBOS: frozenset[tuple[str | None, str | None, str | None]] = frozenset
         ("duration", "measurement", "ms"),
         # Phase 11 -- wireless signal_strength (dBm). Gauges.
         ("signal_strength", "measurement", "dBm"),
+        # Bug 1 fix: diskio duration fields (ms) are gauges with duration device_class
+        ("duration", "measurement", "ms"),
+        # Bug 1 fix: diskio io_util is a percentage gauge
+        (None, "measurement", "%"),
+        # Bug 2 fix: wireless packet counters are dimensionless total_increasing
+        (None, "total_increasing", None),
+        # Bug 3 fix: ipmi_sensor with unit tag mapping
+        ("temperature", "measurement", "°C"),
+        (None, "measurement", "RPM"),
+        ("voltage", "measurement", "V"),
+        ("power", "measurement", "W"),
+        ("current", "measurement", "A"),
     }
 )
 
@@ -156,6 +168,21 @@ REPRESENTATIVE_FIELDS: list[tuple[str, str, float | int | bool]] = [
     ("ups", "battery_runtime", 1),
     ("sensors", "fan1_input", 1),
     ("smart", "energy_rate", 1),
+    # Bug 1 fix: diskio duration and io_util fields
+    ("diskio", "read_time", 1),
+    ("diskio", "write_time", 1),
+    ("diskio", "io_time", 1),
+    ("diskio", "weighted_io_time", 1),
+    ("diskio", "io_util", 1),
+    # Bug 2 fix: wireless packet counters
+    ("wireless", "nwid", 1),
+    ("wireless", "crypt", 1),
+    ("wireless", "frag", 1),
+    ("wireless", "retry", 1),
+    ("wireless", "misc", 1),
+    ("wireless", "missed_beacon", 1),
+    # Bug 3 fix: ipmi_sensor with various unit tags
+    ("ipmi_sensor", "value", 1),  # unit tag handled by tag mapping
 ]
 
 

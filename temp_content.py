@@ -41,13 +41,6 @@ _TOTAL_INCREASING_FIELDS: frozenset[str] = frozenset(
         # Swap in / out (bytes since boot).
         "in",
         "out",
-        # wireless packet counters (total_increasing).
-        "nwid",
-        "crypt",
-        "frag",
-        "retry",
-        "misc",
-        "missed_beacon",
     }
 )
 
@@ -64,11 +57,6 @@ _MS_FIELD_MARKERS: tuple[str, ...] = (
     "_time_ms",
     "latency_ms",
     "duration_ms",
-    # diskio time fields (Telegraf uses bare names without _ms suffix)
-    "read_time",
-    "write_time",
-    "io_time",
-    "weighted_io_time",
 )
 
 # Substring markers for fields expressed in seconds (durations).
@@ -132,53 +120,6 @@ _BYTE_MEASUREMENT_EXCLUDE: frozenset[str] = frozenset(
     }
 )
 
-# --------------------------------------------------------------------------
-# Tag-based unit/device_class mapping registry (Option A).
-#
-# Some Telegraf plugins (e.g. ipmi_sensor) put the unit in a tag rather
-# than the field name. This registry allows per-measurement tag-value
-# mappings to override the field-name-based inference.
-#
-# Structure: measurement_name -> { tag_name -> { tag_value -> (unit, device_class) } }
-# --------------------------------------------------------------------------
-_TAG_UNIT_MAPPINGS: dict[str, dict[str, dict[str, tuple[str | None, str | None]]]] = {
-    "ipmi_sensor": {
-        "unit": {
-            "degrees_c": ("\u00b0C", "temperature"),
-            "degrees_celsius": ("\u00b0C", "temperature"),
-            "celsius": ("\u00b0C", "temperature"),
-            "rpm": ("RPM", None),  # HA has no fan device_class
-            "volts": ("V", "voltage"),
-            "watts": ("W", "power"),
-            "amps": ("A", "current"),
-            "percent": ("%", None),
-        }
-    },
-    # Future measurements with tag-based units can be added here
-}
-
-
-def _apply_tag_unit_mapping(
-    measurement: str,
-    field: str,
-    tags: Mapping[str, str] | None,
-    native_unit: str | None,
-    device_class: str | None,
-) -> tuple[str | None, str | None]:
-    """Apply tag-based unit/device_class mapping if available for this measurement."""
-    if not tags or measurement not in _TAG_UNIT_MAPPINGS:
-        return native_unit, device_class
-
-    mapping = _TAG_UNIT_MAPPINGS[measurement]
-    for tag_name, value_map in mapping.items():
-        tag_value = tags.get(tag_name, "").lower()
-        if tag_value in value_map:
-            mapped_unit, mapped_dc = value_map[tag_value]
-            # Tag mapping takes precedence over field-name inference
-            return mapped_unit, mapped_dc
-
-    return native_unit, device_class
-
 
 def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
     """Parse a Telegraf JSON payload using generic fallback rules.
@@ -227,13 +168,6 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
             continue
 
         translation_key, placeholders = resolve_translation(measurement, clean_tags, field)
-        # Infer base unit/device_class from field name
-        native_unit = infer_native_unit(field, measurement)
-        device_class = infer_device_class(measurement, field)
-        # Apply tag-based override if available (e.g. ipmi_sensor.unit tag)
-        native_unit, device_class = _apply_tag_unit_mapping(
-            measurement, field, clean_tags, native_unit, device_class
-        )
         descriptors.append(
             MetricDescriptor(
                 unique_key=build_unique_key(measurement, clean_tags, field),
@@ -242,8 +176,8 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
                 field=field,
                 value=value,
                 timestamp=timestamp_float,
-                native_unit=native_unit,
-                suggested_device_class=device_class,
+                native_unit=infer_native_unit(field, measurement),
+                suggested_device_class=infer_device_class(measurement, field),
                 suggested_state_class=infer_state_class(field, value),
                 entity_category=resolve_entity_category(measurement, field),
                 # Phase 6: static system metadata (CPU model, vendor id, n_cpus,
@@ -286,10 +220,6 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
     """
     field_lower = field.lower()
     if "percent" in field_lower or field_lower == "percentage":
-        return "%"
-    # diskio io_util is documented as a 0-1 fraction (not percent)
-    # but represents utilization percentage
-    if measurement == "diskio" and field_lower == "io_util":
         return "%"
     if "temp_input" in field_lower or "temp" in field_lower or field_lower == "temperature":
         return "\u00b0C"
