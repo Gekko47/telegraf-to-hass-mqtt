@@ -1,6 +1,8 @@
 import os
 
-filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_components", "telegraf_mqtt", "parsers", "generic.py")
+filepath = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "custom_components", "telegraf_mqtt", "parsers", "generic.py"
+)
 with open(filepath, "r") as f:
     content = f.read()
 
