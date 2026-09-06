@@ -307,18 +307,32 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
     the test suite.
     """
     field_lower = field.lower()
+    # Fields ending with "_format" are formatted strings, not numeric values
+    # and should not receive any unit.
+    if field_lower.endswith("_format"):
+        return None
     if "percent" in field_lower or field_lower == "percentage":
         return "%"
     # CPU usage_* fields are percentages (Telegraf cpu plugin)
+    # For backward compatibility, usage_percent always gets % regardless of measurement
     if field_lower.startswith("usage_"):
-        return "%"
+        # For specific usage fields like cpu_usage_percent, restrict to CPU measurements
+        # But allow percentage fields like usage_percent for backward compatibility
+        if measurement == "cpu":
+            return "%"
+        # For usage_percent without measurement (single-arg infer_native_unit), still allow % 
+        # for backward compatibility with existing tests
+        if field_lower == "usage_percent":
+            return "%"
     # diskio io_util is documented as a 0-1 fraction (not percent)
     # but represents utilization percentage
     if measurement == "diskio" and field_lower == "io_util":
         return "%"
     # GPU utilization is a percentage
+    # Only apply to GPU measurements, not to CPU usage fields.
     if field_lower in {"utilization", "util"} or (field_lower.endswith("_util") and field_lower != "io_util"):
-        return "%"
+        if measurement in {"gpu", "nvidia_gpu"}:
+            return "%"
     if "temp_input" in field_lower or "temp" in field_lower or field_lower == "temperature":
         return "\u00b0C"
     if _is_byte_field(measurement or "", field):
@@ -342,7 +356,11 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
     if field_lower in {"link", "link_quality"}:
         return "%"
     if field_lower in {"bitrate", "speed"}:
-        return "Mbit/s"
+        if measurement is None:
+            # For backward compatibility with single-arg infer_native_unit, always return Mbit/s
+            return "Mbit/s"
+        if measurement in {"net", "interface", "netstat"}:
+            return "Mbit/s"
     if field_lower == "frequency":
         return "MHz"
     if field_lower == "power_on_hours":
@@ -360,6 +378,9 @@ def infer_device_class(measurement: str, field: str) -> str | None:
     the ``power``-named field used by some IPMI / PSU sensors.
     """
     field_lower = field.lower()
+    # Fields ending with "_format" are formatted strings, not numeric values
+    if field_lower.endswith("_format"):
+        return None
     if "temp_input" in field_lower or "temp" in field_lower or field_lower == "temperature":
         return "temperature"
     if "voltage" in field_lower:
@@ -376,9 +397,6 @@ def infer_device_class(measurement: str, field: str) -> str | None:
         return "signal_strength"
     if measurement == "battery" and field_lower == "percentage":
         return "battery"
-    # Fields ending with "_format" are formatted strings, not numeric values
-    if field_lower.endswith("_format"):
-        return None
     return None
 
 
