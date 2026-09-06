@@ -48,6 +48,8 @@ _TOTAL_INCREASING_FIELDS: frozenset[str] = frozenset(
         "retry",
         "misc",
         "missed_beacon",
+        # Energy counters (cumulative Wh)
+        "energy",
     }
 )
 
@@ -121,6 +123,28 @@ _BYTE_MEASUREMENT_INCLUDE: frozenset[str] = frozenset(
         "low_total",
         "in",
         "out",
+        # GPU memory fields (nvidia_gpu measurement)
+        "mem_total",
+        "mem_used",
+        # Additional memory fields documented as bytes by Telegraf mem plugin
+        "active",
+        "commit_limit",
+        "committed_as",
+        "dirty",
+        "huge_page_size",
+        "inactive",
+        "mapped",
+        "page_tables",
+        "slab",
+        "sreclaimable",
+        "sunreclaim",
+        "swap_cached",
+        "swap_free",
+        "swap_total",
+        "vmalloc_chunk",
+        "vmalloc_total",
+        "vmalloc_used",
+        "write_back",
     }
 )
 
@@ -285,9 +309,15 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
     field_lower = field.lower()
     if "percent" in field_lower or field_lower == "percentage":
         return "%"
+    # CPU usage_* fields are percentages (Telegraf cpu plugin)
+    if field_lower.startswith("usage_"):
+        return "%"
     # diskio io_util is documented as a 0-1 fraction (not percent)
     # but represents utilization percentage
     if measurement == "diskio" and field_lower == "io_util":
+        return "%"
+    # GPU utilization is a percentage
+    if field_lower in {"utilization", "util"} or (field_lower.endswith("_util") and field_lower != "io_util"):
         return "%"
     if "temp_input" in field_lower or "temp" in field_lower or field_lower == "temperature":
         return "\u00b0C"
@@ -311,7 +341,7 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
         return "dBm"
     if field_lower in {"link", "link_quality"}:
         return "%"
-    if field_lower == "bitrate":
+    if field_lower in {"bitrate", "speed"}:
         return "Mbit/s"
     if field_lower == "frequency":
         return "MHz"
@@ -346,6 +376,9 @@ def infer_device_class(measurement: str, field: str) -> str | None:
         return "signal_strength"
     if measurement == "battery" and field_lower == "percentage":
         return "battery"
+    # Fields ending with "_format" are formatted strings, not numeric values
+    if field_lower.endswith("_format"):
+        return None
     return None
 
 
@@ -361,6 +394,9 @@ def infer_state_class(field: str, value: MetricValue) -> str | None:
         return None
     field_lower = field.lower()
     if field in _TOTAL_INCREASING_FIELDS:
+        return "total_increasing"
+    # Energy fields are cumulative counters (not energy_rate which is power)
+    if "energy" in field_lower and "rate" not in field_lower:
         return "total_increasing"
     if any(marker in field_lower for marker in _BYTE_FIELD_MARKERS):
         return "total_increasing"

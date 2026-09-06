@@ -60,7 +60,7 @@ REFERENCE_PAYLOADS: list[dict] = [
 # (field, expected_name, native_unit, suggested_device_class, entity_category) per reference payload.
 # Names are produced by translations_strings.format_translation, which mirrors en.json.
 EXPECTED_NAMING: dict[str, list[tuple[str, str, str | None, str | None, str | None]]] = {
-    "cpu": [("usage_idle", "CPU Usage Idle", None, None, None)],
+    "cpu": [("usage_idle", "CPU Usage Idle", "%", None, None)],
     "mem": [
         ("used_percent", "Memory Used Percent", "%", None, None),
         # Phase 11: ``mem.used`` is documented as bytes in Telegraf's
@@ -81,9 +81,9 @@ EXPECTED_NAMING: dict[str, list[tuple[str, str, str | None, str | None, str | No
     ],
     "sensors": [("temp_input", "CPU Package Temperature", "\u00b0C", "temperature", None)],
     "nvidia_gpu": [
-        ("gpu_util", "GPU Utilization", None, None, None),
+        ("gpu_util", "GPU Utilization", "%", None, None),
         ("temp", "GPU Temperature", "\u00b0C", "temperature", None),
-        ("mem_used", "GPU Memory Used", None, None, None),
+        ("mem_used", "GPU Memory Used", "B", "data_size", None),
     ],
     "battery": [
         ("percentage", "Battery Percentage", "%", "battery", None),
