@@ -353,35 +353,34 @@ def test_every_handler_swallows_unicode_weirdness() -> None:
         assert isinstance(result, list)
 
 
-
 def test_apply_tag_unit_mapping_edge_cases() -> None:
     from custom_components.telegraf_mqtt.parsers.generic import _apply_tag_unit_mapping
 
     # Case 1: tags is None -> early return
-    unit, dc = _apply_tag_unit_mapping('ipmi_sensor', 'value', None, 'ms', 'duration')
-    assert unit == 'ms' and dc == 'duration'
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "value", None, "ms", "duration")
+    assert unit == "ms" and dc == "duration"
 
     # Case 2: tags is empty dict -> early return
-    unit, dc = _apply_tag_unit_mapping('ipmi_sensor', 'value', {}, 'ms', 'duration')
-    assert unit == 'ms' and dc == 'duration'
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "value", {}, "ms", "duration")
+    assert unit == "ms" and dc == "duration"
 
     # Case 3: measurement not in _TAG_UNIT_MAPPINGS -> early return
-    unit, dc = _apply_tag_unit_mapping('cpu', 'value', {'unit': 'degrees_c'}, 'ms', 'duration')
-    assert unit == 'ms' and dc == 'duration'
+    unit, dc = _apply_tag_unit_mapping("cpu", "value", {"unit": "degrees_c"}, "ms", "duration")
+    assert unit == "ms" and dc == "duration"
 
     # Case 4: measurement in _TAG_UNIT_MAPPINGS but tag value doesn't match -> falls through
-    unit, dc = _apply_tag_unit_mapping('ipmi_sensor', 'value', {'unit': 'unknown_unit'}, 'ms', 'duration')
-    assert unit == 'ms' and dc == 'duration'
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "value", {"unit": "unknown_unit"}, "ms", "duration")
+    assert unit == "ms" and dc == "duration"
 
     # Case 5: tag name exists but value not in value_map -> falls through
-    unit, dc = _apply_tag_unit_mapping('ipmi_sensor', 'value', {'unit': 'degrees_c', 'other': 'foo'}, 'ms', 'duration')
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "value", {"unit": "degrees_c", "other": "foo"}, "ms", "duration")
     # Should match 'degrees_c' key and return mapped values
-    assert unit == '\u00b0C' and dc == 'temperature'
+    assert unit == "\u00b0C" and dc == "temperature"
 
     # Case 6: tag name not 'unit' (only 'unit' tag is mapped for ipmi_sensor)
-    unit, dc = _apply_tag_unit_mapping('ipmi_sensor', 'value', {'sensor_type': 'degrees_c'}, 'ms', 'duration')
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "value", {"sensor_type": "degrees_c"}, "ms", "duration")
     # Should not match because only 'unit' tag is in the mapping
-    assert unit == 'ms' and dc == 'duration'
+    assert unit == "ms" and dc == "duration"
 
 
 def test_binary_sensor_coercion_edge_cases() -> None:
@@ -396,45 +395,48 @@ def test_binary_sensor_coercion_edge_cases() -> None:
     assert coerce_to_bool(-0.0) is False
 
     # String true values (case insensitive)
-    assert coerce_to_bool('true') is True
-    assert coerce_to_bool('True') is True
-    assert coerce_to_bool('TRUE') is True
-    assert coerce_to_bool('1') is True
-    assert coerce_to_bool('yes') is True
-    assert coerce_to_bool('on') is True
+    assert coerce_to_bool("true") is True
+    assert coerce_to_bool("True") is True
+    assert coerce_to_bool("TRUE") is True
+    assert coerce_to_bool("1") is True
+    assert coerce_to_bool("yes") is True
+    assert coerce_to_bool("on") is True
 
     # String false values (new - case insensitive)
-    assert coerce_to_bool('false') is False
-    assert coerce_to_bool('False') is False
-    assert coerce_to_bool('FALSE') is False
-    assert coerce_to_bool('0') is False
-    assert coerce_to_bool('no') is False
-    assert coerce_to_bool('off') is False
+    assert coerce_to_bool("false") is False
+    assert coerce_to_bool("False") is False
+    assert coerce_to_bool("FALSE") is False
+    assert coerce_to_bool("0") is False
+    assert coerce_to_bool("no") is False
+    assert coerce_to_bool("off") is False
 
     # Other strings -> True
-    assert coerce_to_bool('something') is True
-    assert coerce_to_bool('') is False  # empty string
+    assert coerce_to_bool("something") is True
+    assert coerce_to_bool("") is False  # empty string
 
     # Whitespace-only strings -> False (same as empty after strip)
-    assert coerce_to_bool('  ') is False  # whitespace-only is False after strip
+    assert coerce_to_bool("  ") is False  # whitespace-only is False after strip
 
 
 def test_infer_native_unit_io_util_diskio() -> None:
     from custom_components.telegraf_mqtt.parsers.generic import infer_native_unit
+
     # io_util is a special case for diskio measurement
-    assert infer_native_unit('io_util', 'diskio') == '%'
+    assert infer_native_unit("io_util", "diskio") == "%"
     # Other measurements don't get this special case
-    assert infer_native_unit('io_util', 'cpu') is None
+    assert infer_native_unit("io_util", "cpu") is None
 
 
 def test_infer_state_class_wireless_counters() -> None:
     from custom_components.telegraf_mqtt.parsers.generic import infer_state_class
+
     # Wireless packet counters should be total_increasing
-    for field in ['nwid', 'crypt', 'frag', 'retry', 'misc', 'missed_beacon']:
-        assert infer_state_class(field, 100.0) == 'total_increasing', f'{field} should be total_increasing'
+    for field in ["nwid", "crypt", "frag", "retry", "misc", "missed_beacon"]:
+        assert infer_state_class(field, 100.0) == "total_increasing", f"{field} should be total_increasing"
     # But signal strength fields should be measurement
-    assert infer_state_class('level', -45) == 'measurement'
-    assert infer_state_class('noise', -90) == 'measurement'
+    assert infer_state_class("level", -45) == "measurement"
+    assert infer_state_class("noise", -90) == "measurement"
+
 
 def test_every_handler_swallows_extreme_field_counts() -> None:
     """A payload with 1000 valid fields still returns a list -- no
