@@ -4,7 +4,7 @@ name = "telegraf-to-hass-mqtt"
 # CI's ``hassfest`` validates it). The static value here is locked to it
 # by ``tests/test_placeholder.py::test_pyproject_version_matches_manifest``
 # so a release that bumps one without the other fails the test gate.
-version = "1.4.0"
+version = "1.4.1"
 description = "Home Assistant custom integration: one device per Telegraf-reported PC"
 # Repo-wide Python floor -- HA 2026.6.x requires CPython >=3.14 (its
 # ``homeassistant`` Requires-Python). Every tool surface declares the same

@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-09-06
+
+### Fixed
+- **diskio: four of the plugin's most useful fields get no unit at all**
+  (`parsers/generic.py`). Telegraf's real diskio field names are
+  `read_time`, `write_time`, `io_time`, `weighted_io_time` (bare names,
+  no `_ms` suffix) and `io_util`. The previous `_MS_FIELD_MARKERS`
+  only matched names containing `response_ms` / `_time_ms` /
+  `latency_ms` / `duration_ms` -- none of which appear in Telegraf's
+  actual field names -- so these four duration fields and the
+  `io_util` percent gauge got no unit, no device_class. Added the
+  four time fields to `_MS_FIELD_MARKERS` and a special case for
+  `io_util` -> `%` in `infer_native_unit`.
+- **wireless: every packet counter silently becomes a plain gauge**
+  (`parsers/generic.py`). Telegraf's wireless plugin reports
+  `nwid`, `crypt`, `frag`, `retry`, `misc`, `missed_beacon` as
+  counter-typed fields upstream. None of the six were in
+  `_TOTAL_INCREASING_FIELDS` or matched a byte marker, so they all
+  fell through to the gauge default. Added all six to
+  `_TOTAL_INCREASING_FIELDS` so they correctly map to
+  `state_class="total_increasing"`.
+- **ipmi_sensor: the entire unit-mapping feature is dead code**
+  (`parsers/ipmi_sensor.py`, `parsers/generic.py`). IPMI's single
+  field is always named `value`; the real unit (temperature, RPM,
+  volts, watts, etc.) lives on the `unit` tag. The previous
+  `_UNIT_TO_DEVICE_CLASS` dict in `ipmi_sensor.py` was defined but
+  never imported by any platform layer, so every IPMI sensor (fan,
+  temp, voltage, power, current) got zero unit and zero
+  device_class. Replaced with a new `_TAG_UNIT_MAPPINGS` registry
+  in `parsers/generic.py` that reads the `unit` tag at parse time
+  and applies the mapping. The registry is extensible for future
+  measurements that put units in tags.
+
+### Changed
+- **`coerce_to_bool` now recognises explicit-false string values**
+  (`models.py`). Previously only the truthy strings
+  (`"true"`, `"1"`, `"yes"`, `"on"`) were special-cased; a string
+  `"false"`, `"0"`, `"no"`, `"off"` (any case) was treated as
+  truthy because it was non-empty. Now the explicit-false strings
+  return `False`, matching the existing truthy contract.
+- **Handler error logging upgraded from DEBUG to WARNING**
+  (`parser.py`). A faulty per-measurement handler now surfaces in
+  the operator's log at WARNING instead of being silently swallowed
+  at DEBUG. The `dropped_parser_error` counter continues to bump so
+  diagnostics still aggregate the failure rate.
+- **Invalid category override values now log a WARNING**
+  (`naming.py`). Previously a typo in a `category_overrides` value
+  silently fell through to the heuristic result. The function now
+  emits a `WARNING` describing the accepted values
+  (`"config"`, `"diagnostic"`, `""`, `None`) and the bad value that
+  was provided.
+- **Cleanup-policy time constants use `datetime.timedelta`**
+  (`const.py`). The 30 / 60-day defaults now read
+  `int(timedelta(days=30).total_seconds())` instead of the
+  `30 * 24 * 60 * 60` magic number; same value, self-documenting.
+- **Removed duplicate translation key definitions**
+  (`naming.py`). Two blocks of `TK_SYSTEM_FIELD` /
+  `TK_KERNEL_FIELD` / `TK_PROCESSES_FIELD` / `TK_SWAP_FIELD` /
+  `TK_DISKIO_FIELD` / `TK_PING_FIELD` / `TK_SMART_FIELD` /
+  `TK_WIRELESS_FIELD` / `TK_DOCKER_FIELD` / `TK_ZFS_FIELD` /
+  `TK_NET_RESPONSE_FIELD` / `TK_HTTP_RESPONSE_FIELD` /
+  `TK_INTERRUPTS_FIELD` / `TK_IPMI_FIELD` existed; the second
+  block (with placeholder comments) is the authoritative one and
+  the first block has been removed.
+- **Removed dead `_UNIT_TO_DEVICE_CLASS` dict**
+  (`parsers/ipmi_sensor.py`). The table was superseded by
+  `_TAG_UNIT_MAPPINGS` in `generic.py`; the file's own updated
+  docstring already pointed to the new mechanism. Kept the
+  parser module to a single function with a clear contract.
+- **Moved QA/QC plan to `docs/`**. The planning document
+  previously sat at the repo root (`QA_QC_PLAN.md`); it now lives
+  at `docs/qa-qc-plan.md` so the repo root is reserved for the
+  integration itself.
+
 ## [1.4.0] - 2026-09-04
 
 ### Added
