@@ -12,6 +12,7 @@ repos:
       - id: mypy
         args: [--strict, --explicit-package-bases]
         additional_dependencies: [homeassistant==2026.6.4, types-PyYAML, types-requests]
+        pass_filenames: false
 
   - repo: local
     hooks:
