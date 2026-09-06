@@ -37,20 +37,6 @@ TK_SENSOR_FIELD = "sensor_field"
 TK_GPU_FIELD = "gpu_field"
 TK_BATTERY_FIELD = "battery_field"
 TK_GENERIC_FIELD = "generic_field"
-TK_SYSTEM_FIELD = "system_field"
-TK_KERNEL_FIELD = "kernel_field"
-TK_PROCESSES_FIELD = "processes_field"
-TK_SWAP_FIELD = "swap_field"
-TK_DISKIO_FIELD = "diskio_field"
-TK_PING_FIELD = "ping_field"
-TK_SMART_FIELD = "smart_field"
-TK_WIRELESS_FIELD = "wireless_field"
-TK_DOCKER_FIELD = "docker_field"
-TK_ZFS_FIELD = "zfs_field"
-TK_NET_RESPONSE_FIELD = "net_response_field"
-TK_HTTP_RESPONSE_FIELD = "http_response_field"
-TK_INTERRUPTS_FIELD = "interrupts_field"
-TK_IPMI_FIELD = "ipmi_field"
 # Phase 11 -- one translation key per new measurement. The template is
 # ``"{measurement} {field}"`` for the simple ones; per-device / per-
 # container / per-pool variants layer an extra placeholder.
@@ -330,7 +316,7 @@ def apply_category_override(
     - ``""`` or ``None`` -> clear the auto-derived category (entity
       appears in the primary list).
     - any other value -> the override is ignored and the heuristic
-      result is returned.
+      result is returned (warning logged).
 
     Missing / invalid override keys return the heuristic result
     unchanged. The function is total over its inputs.
@@ -348,6 +334,14 @@ def apply_category_override(
         return ENTITY_CATEGORY_CONFIG
     if raw == ENTITY_CATEGORY_DIAGNOSTIC:
         return ENTITY_CATEGORY_DIAGNOSTIC
+    # Invalid override value - log warning and fall back to heuristic
+    import logging
+    logging.getLogger(__name__).warning(
+        "Invalid category override value %r for key %r (metric %s.%s); "
+        "accepted values: 'config', 'diagnostic', '', None. "
+        "Falling back to auto-derived category.",
+        raw, matched, measurement, field,
+    )
     return heuristic
 
 

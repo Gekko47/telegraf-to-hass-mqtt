@@ -229,8 +229,7 @@ class TelegrafParser:
             # JSON envelope has been validated and the measurement name
             # is a string, so any of these four exceptions means a bad
             # assumption inside the handler (e.g. ``fields["x"]`` on a
-            # missing key, a nested-dict coerced to ``float``, a
-            # ``Measurement.tags`` typo). We log at DEBUG, bump the
+            # ``Measurement.tags`` typo). We log at WARNING, bump the
             # ``dropped_parser_error`` counter, and return ``[]`` so
             # the MQTT subscription keeps processing the next message.
             #
@@ -238,7 +237,7 @@ class TelegrafParser:
             # SystemExit, MemoryError, asyncio.CancelledError, ...)
             # propagate as designed -- the narrow catch is a guard rail
             # for *handler* bugs, not a blanket suppression.
-            _LOGGER.debug(
+            _LOGGER.warning(
                 "Telegraf handler %r raised on topic %s: %s",
                 measurement,
                 topic,

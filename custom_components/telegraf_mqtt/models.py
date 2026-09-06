@@ -48,13 +48,20 @@ def coerce_to_bool(value: MetricValue) -> bool:
     Convention: 0 / 0.0 / "" -> False; everything else -> True. Used when
     a user has set a ``field_overrides[platform] = "binary_sensor"`` hint
     on a field that arrives as an int (0/1) rather than a JSON bool.
+
+    String values matching (case-insensitive): true, 1, yes, on -> True
+    String values matching (case-insensitive): false, 0, no, off -> False
+    Other strings -> True (non-empty)
     """
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes", "on"}
+        stripped = value.strip().lower()
+        if not stripped:
+            return False
+        return stripped not in {"false", "0", "no", "off"}
     return False
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
 DOMAIN = "telegraf_mqtt"
@@ -107,8 +108,8 @@ MAX_EXPIRY_TICK_SECONDS = 30
 DEFAULT_MAX_DEVICES = 50
 MAX_METRICS_PER_DEVICE = 1000
 DEFAULT_ENABLE_CLEANUP = True
-DEFAULT_CLEANUP_DELAY = 30 * 24 * 60 * 60  # 30 days
-DEFAULT_DELETE_DELAY = 60 * 24 * 60 * 60  # 60 days
+DEFAULT_CLEANUP_DELAY = int(timedelta(days=30).total_seconds())  # 30 days
+DEFAULT_DELETE_DELAY = int(timedelta(days=60).total_seconds())  # 60 days
 DEFAULT_MIN_ACTIVE_METRICS = 1
 
 # Cleanup-policy literal values. Kept here so the Literal in models.py and

@@ -6,6 +6,9 @@ voltage, current, power, ...). The single numeric field is always
 string (e.g. ``"degrees_c"`` / ``"rpm"`` / ``"volts"`` / ``"watts"``).
 The parser reads the unit tag to decide the device_class on the
 descriptor; everything else delegates to the generic path.
+
+The unit tag is mapped to HA native_unit and device_class via the
+``_TAG_UNIT_MAPPINGS`` registry in ``parsers.generic``.
 """
 
 from __future__ import annotations
@@ -36,9 +39,7 @@ _UNIT_TO_DEVICE_CLASS: dict[str, str] = {
 def parse_ipmi_sensor_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
     """Parse ``ipmi_sensor`` payloads using the generic descriptor path.
 
-    A separate ``ipmitool`` unit-string -> HA device_class mapping is
-    applied by the platform layer (sensor.py), not here -- the parser
-    stays a pure delegate. The mapping is exposed via
-    :data:`_UNIT_TO_DEVICE_CLASS` for the platform to import.
+    The ``unit`` tag is mapped to HA native_unit and device_class via the
+    ``_TAG_UNIT_MAPPINGS`` registry in ``parsers.generic``.
     """
     return parse_generic_payload(payload)
