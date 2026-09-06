@@ -1,6 +1,6 @@
 import os
 
-filepath = "c:/repos/telegraf-to-hass-mqtt/custom_components/telegraf_mqtt/parsers/generic.py"
+filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_components", "telegraf_mqtt", "parsers", "generic.py")
 with open(filepath, "r") as f:
     content = f.read()
 
@@ -51,8 +51,11 @@ else:
 old_speed = """    if field_lower in {"bitrate", "speed"}:
         return "Mbit/s" """
 
-new_speed = """    if field_lower in {"bitrate", "speed"} and measurement in {"net", "interface", "netstat"}:
-        return "Mbit/s" """
+new_speed = """    if field_lower in {"bitrate", "speed"}:
+        if measurement is None:
+            return "Mbit/s"
+        if measurement in {"net", "interface", "netstat"}:
+            return "Mbit/s" """
 
 if old_speed in content:
     content = content.replace(old_speed, new_speed)

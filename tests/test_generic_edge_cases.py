@@ -382,6 +382,10 @@ def test_apply_tag_unit_mapping_edge_cases() -> None:
     # Should not match because only 'unit' tag is in the mapping
     assert unit == "ms" and dc == "duration"
 
+    # Case 7: _format fields bypass tag unit mapping even with a matching unit tag
+    unit, dc = _apply_tag_unit_mapping("ipmi_sensor", "temp_format", {"unit": "degrees_c"}, None, None)
+    assert unit is None and dc is None
+
 
 def test_binary_sensor_coercion_edge_cases() -> None:
     from custom_components.telegraf_mqtt.models import coerce_to_bool
@@ -453,3 +457,109 @@ def test_every_handler_swallows_extreme_field_counts() -> None:
         result = _parse_for(measurement, payload)
         assert isinstance(result, list)
         assert len(result) == 1000
+
+
+def test_infer_native_unit_format_fields_get_no_unit() -> None:
+    """Fields ending in ``_format`` (e.g. ``system.uptime_format``) are
+    pre-formatted strings, not numeric metrics, so neither argument form
+    should attach a unit even when the name carries a numeric-looking
+    substring.
+    """
+    assert infer_native_unit("uptime_format") is None
+    assert infer_native_unit("uptime_format", "system") is None
+    assert infer_native_unit("temp_format", "smart") is None
+
+
+def test_infer_native_unit_usage_fields_need_cpu_measurement() -> None:
+    """``usage_*`` percent is specific to Telegraf's ``cpu`` plugin; other
+    measurements fall through. ``usage_percent`` is still caught by the
+    generic ``percent`` substring check for backward compatibility.
+    """
+    assert infer_native_unit("usage_idle", "cpu") == "%"
+    assert infer_native_unit("usage_user") is None
+    assert infer_native_unit("usage_user", "docker") is None
+    assert infer_native_unit("usage_percent", "mem") == "%"
+
+
+def test_infer_native_unit_speed_restricted_to_network_measurements() -> None:
+    """``bitrate`` / ``speed`` resolve to ``Mbit/s`` only for the network
+    measurement family. The single-argument form keeps the legacy
+    ``Mbit/s`` default, and non-network measurements stay unit-less.
+    """
+    assert infer_native_unit("bitrate", "net") == "Mbit/s"
+    assert infer_native_unit("speed", "interface") == "Mbit/s"
+    assert infer_native_unit("speed", "netstat") == "Mbit/s"
+    assert infer_native_unit("bitrate", "cpu") is None
+    assert infer_native_unit("speed", "disk") is None
+
+
+def test_infer_device_class_format_fields_get_no_device_class() -> None:
+    """``*_format`` fields are strings; even when a temperature-like
+    substring sneaks in, the device class must stay None.
+    """
+    assert infer_device_class("system", "uptime_format") is None
+    assert infer_device_class("smart", "temp_format") is None
+
+
+def test_infer_state_class_energy_fields_are_counters() -> None:
+    """Cumulative energy fields (``energy``, ``total_energy``) are
+    ``total_increasing``; the instantaneous ``energy_rate`` field stays a
+    gauge.
+    """
+    assert infer_state_class("energy", 1) == "total_increasing"
+    assert infer_state_class("total_energy", 100) == "total_increasing"
+    assert infer_state_class("energy_consumption", 1) == "total_increasing"
+    assert infer_state_class("energy_rate", 1) == "measurement"
+
+
+def test_infer_state_class_format_fields_never_get_state_class() -> None:
+    """``*_format`` fields are pre-formatted display strings, so they never
+    carry a state class -- not even when the value is numeric and the field
+    name embeds a counter-looking marker (``uptime_format`` contains
+    ``uptime``, ``temp_format`` looks temperature-like).
+    """
+    assert infer_state_class("uptime_format", "42 seconds") is None
+    assert infer_state_class("uptime_format", 42) is None
+    assert infer_state_class("temp_format", 3.25) is None
+
+
+def test_parse_generic_uptime_format_descriptor_has_no_unit() -> None:
+    """End-to-end: the ``system`` plugin ships ``uptime`` (seconds) next to
+    ``uptime_format`` (a human-readable string). The parser must attach a
+    duration/``data_size``-style inference only to the numeric field and
+    leave the ``_format`` field unit-less and device-class-less.
+    """
+    descriptors = parse_generic_payload(
+        {
+            "name": "system",
+            "tags": {"host": "h1"},
+            "fields": {"uptime": 42.0, "uptime_format": "42 seconds"},
+            "timestamp": 1,
+        }
+    )
+    by_field = {descriptor.field: descriptor for descriptor in descriptors}
+    assert set(by_field) == {"uptime", "uptime_format"}
+    assert by_field["uptime"].native_unit == "s"
+    assert by_field["uptime_format"].native_unit is None
+    assert by_field["uptime_format"].suggested_device_class is None
+    assert by_field["uptime_format"].suggested_state_class is None
+
+
+def test_parse_generic_format_field_ignores_unit_tag() -> None:
+    """End-to-end: a ``*_format`` field stays unit/device-class-less even
+    when a tag-based mapping (``ipmi_sensor.unit``) is present, while its
+    non-format sibling still receives the mapped unit/device_class.
+    """
+    descriptors = parse_generic_payload(
+        {
+            "name": "ipmi_sensor",
+            "tags": {"host": "h1", "unit": "degrees_c"},
+            "fields": {"temp_input": 42.0, "temp_format": "42.0 C"},
+            "timestamp": 1,
+        }
+    )
+    by_field = {descriptor.field: descriptor for descriptor in descriptors}
+    assert by_field["temp_input"].native_unit == "\u00b0C"
+    assert by_field["temp_input"].suggested_device_class == "temperature"
+    assert by_field["temp_format"].native_unit is None
+    assert by_field["temp_format"].suggested_device_class is None

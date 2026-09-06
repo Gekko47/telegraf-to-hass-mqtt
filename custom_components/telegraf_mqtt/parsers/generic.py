@@ -192,6 +192,10 @@ def _apply_tag_unit_mapping(
     """Apply tag-based unit/device_class mapping if available for this measurement."""
     if not tags or measurement not in _TAG_UNIT_MAPPINGS:
         return native_unit, device_class
+    # Fields ending with "_format" are pre-formatted display strings, not
+    # numeric metrics: never map a tag unit/device_class onto them.
+    if field.lower().endswith("_format"):
+        return native_unit, device_class
 
     mapping = _TAG_UNIT_MAPPINGS[measurement]
     for tag_name, value_map in mapping.items():
@@ -254,8 +258,14 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
         # Infer base unit/device_class from field name
         native_unit = infer_native_unit(field, measurement)
         device_class = infer_device_class(measurement, field)
-        # Apply tag-based override if available (e.g. ipmi_sensor.unit tag)
-        native_unit, device_class = _apply_tag_unit_mapping(measurement, field, clean_tags, native_unit, device_class)
+        # Fields ending in "_format" are pre-formatted display strings: bypass
+        # the tag-based mapping entirely so their original format value is
+        # preserved even when a "unit" tag is present (e.g. ipmi_sensor).
+        if not field.lower().endswith("_format"):
+            # Apply tag-based override if available (e.g. ipmi_sensor.unit tag)
+            native_unit, device_class = _apply_tag_unit_mapping(
+                measurement, field, clean_tags, native_unit, device_class
+            )
         descriptors.append(
             MetricDescriptor(
                 unique_key=build_unique_key(measurement, clean_tags, field),
@@ -313,26 +323,22 @@ def infer_native_unit(field: str, measurement: str | None = None) -> str | None:
         return None
     if "percent" in field_lower or field_lower == "percentage":
         return "%"
-    # CPU usage_* fields are percentages (Telegraf cpu plugin)
-    # For backward compatibility, usage_percent always gets % regardless of measurement
-    if field_lower.startswith("usage_"):
-        # For specific usage fields like cpu_usage_percent, restrict to CPU measurements
-        # But allow percentage fields like usage_percent for backward compatibility
-        if measurement == "cpu":
-            return "%"
-        # For usage_percent without measurement (single-arg infer_native_unit), still allow % 
-        # for backward compatibility with existing tests
-        if field_lower == "usage_percent":
-            return "%"
+    # CPU usage_* fields are percentages (Telegraf cpu plugin). The generic
+    # ``usage_percent`` / ``percentage`` fields are already handled by the
+    # ``percent`` substring check above, so only the CPU measurement needs
+    # the explicit percent treatment here.
+    if field_lower.startswith("usage_") and measurement == "cpu":
+        return "%"
     # diskio io_util is documented as a 0-1 fraction (not percent)
     # but represents utilization percentage
     if measurement == "diskio" and field_lower == "io_util":
         return "%"
     # GPU utilization is a percentage
     # Only apply to GPU measurements, not to CPU usage fields.
-    if field_lower in {"utilization", "util"} or (field_lower.endswith("_util") and field_lower != "io_util"):
-        if measurement in {"gpu", "nvidia_gpu"}:
-            return "%"
+    if (
+        field_lower in {"utilization", "util"} or (field_lower.endswith("_util") and field_lower != "io_util")
+    ) and measurement in {"gpu", "nvidia_gpu"}:
+        return "%"
     if "temp_input" in field_lower or "temp" in field_lower or field_lower == "temperature":
         return "\u00b0C"
     if _is_byte_field(measurement or "", field):
@@ -406,11 +412,17 @@ def infer_state_class(field: str, value: MetricValue) -> str | None:
     Phase 11: byte counters and second-precision durations are
     monotonically increasing, so they map to ``total_increasing``.
     Millisecond durations (latency) are gauges, not counters. Everything
-    numeric falls through to ``measurement`` (gauge).
+    numeric falls through to ``measurement`` (gauge). Fields ending in
+    ``_format`` are pre-formatted display strings and never get a state
+    class -- even when the value happens to be numeric (the same
+    invariant the ``infer_native_unit`` / ``infer_device_class``
+    ``_format`` guards enforce).
     """
     if isinstance(value, (bool, str)):
         return None
     field_lower = field.lower()
+    if field_lower.endswith("_format"):
+        return None
     if field in _TOTAL_INCREASING_FIELDS:
         return "total_increasing"
     # Energy fields are cumulative counters (not energy_rate which is power)
