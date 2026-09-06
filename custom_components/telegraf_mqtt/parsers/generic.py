@@ -231,9 +231,7 @@ def parse_generic_payload(payload: Mapping[str, Any]) -> list[MetricDescriptor]:
         native_unit = infer_native_unit(field, measurement)
         device_class = infer_device_class(measurement, field)
         # Apply tag-based override if available (e.g. ipmi_sensor.unit tag)
-        native_unit, device_class = _apply_tag_unit_mapping(
-            measurement, field, clean_tags, native_unit, device_class
-        )
+        native_unit, device_class = _apply_tag_unit_mapping(measurement, field, clean_tags, native_unit, device_class)
         descriptors.append(
             MetricDescriptor(
                 unique_key=build_unique_key(measurement, clean_tags, field),

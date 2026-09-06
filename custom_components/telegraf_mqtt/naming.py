@@ -336,11 +336,15 @@ def apply_category_override(
         return ENTITY_CATEGORY_DIAGNOSTIC
     # Invalid override value - log warning and fall back to heuristic
     import logging
+
     logging.getLogger(__name__).warning(
         "Invalid category override value %r for key %r (metric %s.%s); "
         "accepted values: 'config', 'diagnostic', '', None. "
         "Falling back to auto-derived category.",
-        raw, matched, measurement, field,
+        raw,
+        matched,
+        measurement,
+        field,
     )
     return heuristic
 
