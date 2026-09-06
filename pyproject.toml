@@ -104,6 +104,7 @@ python_version = "3.14"
 files = ["custom_components/telegraf_mqtt"]
 strict = true
 show_error_codes = true
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = "homeassistant.*"
