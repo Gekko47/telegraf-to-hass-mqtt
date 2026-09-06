@@ -440,3 +440,17 @@ cov.txt
 coverage_out.txt
 coverage_full.txt
 pytest_out.txt
+
+# Dev scaffolding scripts - never commit these. They are ad-hoc tools
+# used during parser/registry refactors to read, transform, and rewrite
+# a file's content programmatically (typically by piping the staged
+# content through a Python one-liner when the host shell's quoting
+# cannot carry the payload). They are checked in here to prevent
+# re-adding the same files after a cleanup commit. Any future refactor
+# of the same shape should re-create them locally and ``git clean``
+# after, not commit them.
+gen.py
+write_generic.py
+temp_content.py
+generic_new.txt
+generic_full.py
