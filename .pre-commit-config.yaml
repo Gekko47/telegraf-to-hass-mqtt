@@ -10,7 +10,7 @@ repos:
     rev: v1.20.2
     hooks:
       - id: mypy
-        args: [--strict, --explicit-package-bases, custom_components]
+        args: [--strict, --explicit-package-bases]
         additional_dependencies: [homeassistant==2026.6.4, types-PyYAML, types-requests]
 
   - repo: local
