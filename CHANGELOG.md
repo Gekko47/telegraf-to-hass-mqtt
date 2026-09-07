@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [1.4.2] - 2026-09-07
+
+### Changed
+- **pytest configuration moved into `pyproject.toml`** (`pytest.ini`
+  removed). pytest gives `pytest.ini` precedence over `pyproject.toml`,
+  so the two config surfaces could never merge (pytest logged
+  "WARNING: ignoring pytest config in pyproject.toml!" and silently
+  dropped `testpaths` / `filterwarnings` / `markers`). The
+  `-p no:homeassistant` + `--cov` + 100%-coverage `addopts` now live in
+  `[tool.pytest.ini_options]`; the rest of the block is live again.
+- **Developer-workflow cleanup**: removed the one-shot `update_generic.py`
+  scaffolding script (its three patches are applied and pinned by
+  `test_generic_edge_cases.py`) and the fully-implemented
+  `docs/qa-qc-plan.md` temp plan -- every item in it is shipped; the
+  long-term QA/QC system lives in `.cline/` (ROADMAP / TASKS /
+  quality_scale / AGENTS). `.gitignore` now explicitly ignores `.venv/`
+  and the tool caches (`.mypy_cache/`, `.pytest_cache/`,
+  `.ruff_cache/`), and the stale `qa-qc-plan.md` rule was removed.
+- **Tests consolidated/renamed**: the three real-HA-harness files
+  (`test_harness_smoke.py`, `test_harness_devices.py`,
+  `test_real_harness_supplemental.py`) merged into one
+  `tests/test_harness.py`; `tests/test_placeholder.py` renamed to
+  `tests/test_release_readiness.py` (it stopped being a placeholder) and
+  `tests/test_units.py` to `tests/test_formatting.py` (it tests the
+  `units.py` formatter, and `test_platform_units.py` already owns the
+  platform-unit space).
+
 ## [1.4.1] - 2026-09-06
 
 ### Fixed

@@ -1,3 +1,13 @@
+"""Release-readiness and harness-free stub tests.
+
+Formerly ``test_placeholder.py`` -- the file outgrew that name. It pins the
+repo's release/metadata surfaces (versions in sync across ``manifest.json``,
+``pyproject.toml``, ``CHANGELOG.md`` and ``hacs.json``; README/translations
+structure; branding assets), the harness-free HA stubs the unit tests need so
+execution order can never pollute the real-HA harness tests, and the xdist
+regressions those stubs prevent.
+"""
+
 import enum
 import importlib
 import json
@@ -200,29 +210,46 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
     _install_fake_homeassistant(monkeypatch)
     _install_binary_sensor_homeassistant_stubs(monkeypatch)
 
-    binary_sensor_module = importlib.import_module("custom_components.telegraf_mqtt.binary_sensor")
-    manager = DeviceManager()
-    registry = manager.get_or_create_registry("host1", "host1")
-    registry.update(
-        MetricDescriptor(
-            unique_key="link_up",
-            measurement="net",
-            tags={"host": "host1", "interface": "wlan0"},
-            field="link_up",
-            value=True,
-            timestamp=1721664000,
-            native_unit=None,
-            suggested_device_class=None,
-            suggested_state_class=None,
-            entity_category=None,
+    # The stub-backed module only binds to these stubs when it is actually
+    # re-imported: a real-HA import (or an earlier sibling test) caches
+    # ``custom_components.telegraf_mqtt.binary_sensor`` in ``sys.modules``,
+    # and ``importlib.import_module`` would return that stale object bound to
+    # the real ``homeassistant``. Save the pre-test entry, evict it so this
+    # import resolves against the stubs, and restore it in a ``finally`` so a
+    # failing body can never leak the stub-bound module into later real-HA
+    # harness tests.
+    module_name = "custom_components.telegraf_mqtt.binary_sensor"
+    saved_module = sys.modules.get(module_name)
+    sys.modules.pop(module_name, None)
+    try:
+        binary_sensor_module = importlib.import_module(module_name)
+        manager = DeviceManager()
+        registry = manager.get_or_create_registry("host1", "host1")
+        registry.update(
+            MetricDescriptor(
+                unique_key="link_up",
+                measurement="net",
+                tags={"host": "host1", "interface": "wlan0"},
+                field="link_up",
+                value=True,
+                timestamp=1721664000,
+                native_unit=None,
+                suggested_device_class=None,
+                suggested_state_class=None,
+                entity_category=None,
+            )
         )
-    )
-    entry = Entry(RuntimeData(manager=manager))
-    entity = binary_sensor_module.TelegrafMqttBinarySensor(entry, "host1:link_up")
+        entry = Entry(RuntimeData(manager=manager))
+        entity = binary_sensor_module.TelegrafMqttBinarySensor(entry, "host1:link_up")
 
-    assert entity.is_on is True
-    assert entity.available is True
-    assert entity._attr_unique_id == "telegraf_mqtt_host1_link_up"
+        assert entity.is_on is True
+        assert entity.available is True
+        assert entity._attr_unique_id == "telegraf_mqtt_host1_link_up"
+    finally:
+        if saved_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = saved_module
 
 
 def test_manifest_and_translations_are_release_ready() -> None:
@@ -389,8 +416,8 @@ def test_pyproject_documents_xdist_invocation() -> None:
     assert 'asyncio_mode = "auto"' in text
 
 
-def test_placeholder_binary_sensor_stubs_are_self_contained(monkeypatch) -> None:
-    """Regression: the placeholder HA stubs must not depend on sibling tests.
+def test_binary_sensor_stubs_are_self_contained(monkeypatch) -> None:
+    """Regression: the harness-free HA stubs must not depend on sibling tests.
 
     Under sequential ``pytest`` the ``homeassistant.const`` module picks up
     ``EntityCategory`` from whichever test ran first. Under ``pytest -n auto``
@@ -458,13 +485,19 @@ def test_placeholder_binary_sensor_stubs_are_self_contained(monkeypatch) -> None
         canonical = _build_ha_stub_modules()
         missing = placeholder_names - set(canonical)
         assert not missing, (
-            f"Placeholder test_placeholder.py binary-sensor stubs are missing "
+            f"test_release_readiness.py binary-sensor stubs are missing "
             f"these modules from the canonical conftest helper: {sorted(missing)}. "
             f"Re-add them so the suite stays xdist-safe."
         )
     finally:
-        # Restore the pre-test sys.modules state so we never leak the
-        # placeholder stubs into harness-based tests that run afterwards.
+        # Undo the monkeypatched sys.modules entries before restoring the
+        # pre-test state: the helper's setitem() calls recorded absent keys
+        # (the test evicts them first), so the fixture's teardown undo would
+        # otherwise delete the entries the loop below just restored. Draining
+        # the fixture stack here makes its teardown a no-op, then restore the
+        # pre-test sys.modules state so we never leak the placeholder stubs
+        # into harness-based tests that run afterwards.
+        monkeypatch.undo()
         for name, saved in saved_modules.items():
             if saved is None:
                 sys.modules.pop(name, None)

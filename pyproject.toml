@@ -2,9 +2,9 @@
 name = "telegraf-to-hass-mqtt"
 # ``manifest.json`` is the canonical version surface (HACS and HA read it,
 # CI's ``hassfest`` validates it). The static value here is locked to it
-# by ``tests/test_placeholder.py::test_pyproject_version_matches_manifest``
+# by ``tests/test_release_readiness.py::test_pyproject_version_matches_manifest``
 # so a release that bumps one without the other fails the test gate.
-version = "1.4.1"
+version = "1.4.2"
 description = "Home Assistant custom integration: one device per Telegraf-reported PC"
 # Repo-wide Python floor -- HA 2026.6.x requires CPython >=3.14 (its
 # ``homeassistant`` Requires-Python). Every tool surface declares the same
@@ -68,6 +68,15 @@ show_missing = true
 #   xdist, no coverage:    ~1:00
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# ``-p no:homeassistant`` blocks the plugin's entry-point autoload: on
+# Windows it must be imported only AFTER ``tests/conftest.py`` has registered
+# the POSIX shims (``fcntl``/``resource``). conftest.py then loads it
+# explicitly via ``pytest_plugins``. Moved here from the deleted
+# ``pytest.ini`` -- pytest gives ``pytest.ini`` precedence over
+# ``pyproject.toml``, so the two files' settings could never merge
+# (pytest logged "WARNING: ignoring pytest config in pyproject.toml!");
+# a single source of truth wins.
+addopts = "-p no:homeassistant --cov=custom_components/telegraf_mqtt --cov-report=term-missing --cov-fail-under=100"
 asyncio_mode = "auto"
 # Pin the asyncio fixture loop scope explicitly. pytest-asyncio is flipping
 # the implicit default to "function" in an upcoming release; setting it here
@@ -83,7 +92,10 @@ filterwarnings = [
     # Upstream test-plugin noise -- not a DeprecationWarning, so the
     # ``ignore::DeprecationWarning:homeassistant.*`` rule does not catch
     # it. Narrowly scoped to the aiohttp key-class hint from HA core.
-    "ignore:It is recommended to use web.AppKey instances for keys.:homeassistant.components.http",
+    # The empty category field (third ``:``) is load-bearing: with only
+    # three fields pytest would treat ``homeassistant.components.http``
+    # as a warning *category* (and fail to parse it) instead of a module.
+    "ignore:It is recommended to use web.AppKey instances for keys.::homeassistant.components.http",
     # pytest-asyncio emits PytestDeprecationWarning (a separate class from
     # DeprecationWarning) for unset configuration options and upcoming
     # default changes. Silencing the class keeps our own code fully visible

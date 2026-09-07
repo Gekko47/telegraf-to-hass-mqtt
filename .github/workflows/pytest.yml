@@ -27,5 +27,5 @@ jobs:
         run: prek run --all-files
       - name: Type check (mypy --strict)
         run: mypy --strict custom_components
-      - name: Test (100% coverage enforced via pytest.ini)
+      - name: Test (100% coverage enforced via pyproject.toml)
         run: pytest -q

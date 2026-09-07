@@ -28,7 +28,7 @@ from custom_components.telegraf_mqtt.const import (
     MIN_EXPIRY_TICK_SECONDS,
 )
 
-# Harness-environmental only: see tests/test_harness_devices.py — the plugin's
+# Harness-environmental only: see tests/test_harness.py — the plugin's
 # mocked paho client leaks its misc timer past teardown for any test that opens
 # an MQTT subscription; this parametrization is the sanctioned opt-out.
 pytestmark = [pytest.mark.parametrize("expected_lingering_timers", [True])]

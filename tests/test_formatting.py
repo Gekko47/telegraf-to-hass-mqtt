@@ -120,5 +120,5 @@ def test_format_value_handles_nan_and_infinity_gracefully() -> None:
     # ``format_precision`` falls through to ``value`` for unknown units,
     # so NaN / inf propagate as their Python string form.
     assert math.isnan(float(format_value(math.nan, None)))
-    assert math.isinf(float(format_value(math.inf, None)))
-    assert math.isinf(float(format_value(-math.inf, None)))
+    assert float(format_value(math.inf, None)) == math.inf
+    assert float(format_value(-math.inf, None)) == -math.inf
