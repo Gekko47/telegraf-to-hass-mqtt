@@ -3,8 +3,24 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
-# Cline Skills
-.cline/*
+# Cline agent skills ARE version-controlled: the suite in
+# ``.cline/skills/`` encodes the repo's engineering conventions and is
+# cited from source docstrings (e.g. ``models.py`` references
+# ``.cline/skills/architecture-map.md``). The previous blanket
+# ``.cline/*`` rule is what made those citations dangle.
+#
+# Git cannot re-include a file whose parent directory is excluded, so the
+# old pattern had to be replaced rather than amended with ``!`` lines.
+# Instead, ignore the known local/machine-specific Cline state by name.
+# If a new tool-specific file appears, add it here explicitly.
+.cline/settings.json
+.cline/rules.json
+.cline/tasks.json
+.cline/tasks/
+.cline/history/
+.cline/mcp.json
+.qodo/mcp.json
+.roo/mcp.local.json
 
 # User-specific files
 *.rsuser

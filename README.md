@@ -420,7 +420,7 @@ The `prek` (or `pre-commit`) install runs the same `ruff` checks locally before 
 
 ## Roadmap alignment
 
-The repo is organized around a phased roadmap (see `.cline/ROADMAP.md`):
+The repo is organized around a phased roadmap:
 
 - [x] Phase 0: scaffolding, packaging metadata, CI, and the HA 2026.6.x platform floor
 - [x] Phase 1: multi-device core pipeline (one Home Assistant device per Telegraf host)
@@ -433,6 +433,16 @@ The repo is organized around a phased roadmap (see `.cline/ROADMAP.md`):
 - [x] Phase 8: 🥈 Silver gate (reliability hardening)
 - [x] Phase 9: 🥇 Gold gate (translations, icons, docs depth)
 - [x] Phase 10: 🏆 Platinum gate (strict typing, mypy --strict in CI) and HACS release (1.2.0)
+- [x] Phase 11: agent-skill suite (`.cline/skills/`) encoding the conventions above
+
+### Working on this repo
+
+`.cline/skills/` holds task-specific agent skills for this codebase, indexed
+by [`.cline/README.md`](.cline/README.md). They cover the bridge architecture,
+adding Telegraf measurement parsers, HA quality-scale compliance, the
+`mypy --strict` gate, test authoring, MQTT/discovery debugging, option and
+config-flow review, docs and changelog sync, Python syntax portability, and
+repo hygiene.
 
 ## License
 

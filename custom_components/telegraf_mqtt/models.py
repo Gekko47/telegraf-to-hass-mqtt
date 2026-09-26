@@ -78,8 +78,13 @@ class MetricDescriptor:
     exhaustively check the comparisons in ``registry.py``. The field
     belongs on the descriptor by design: it is set at parse time
     (``parsers/static.py`` for static metadata, the parser default
-    otherwise) and never mutated afterwards. See the corrected comment
-    in ``.cline/skills/architecture.md``.
+    otherwise) and never mutated afterwards -- the dataclass is frozen,
+    so a downstream stage that needs a different policy constructs a new
+    descriptor via ``dataclasses.replace`` rather than assigning here.
+    See ``.cline/skills/architecture-map.md`` for the pipeline this
+    field travels through, and ``.cline/skills/strict-typing.md`` for why
+    the ``Literal`` (paired with a ``Final`` constant in ``const.py``)
+    is what makes the comparison in ``registry.py`` exhaustive.
 
     Phase 10: ``platform_hint`` lets a user override the platform a field
     lands on. Default ``"auto"`` preserves the pre-10 behaviour
