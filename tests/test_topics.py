@@ -98,6 +98,10 @@ def test_mqtt_filter_matches_is_the_dual_of_itself() -> None:
         ("#", "telegraf/rack1/cpu"),
         # ...including a trailing '#' on the outer covering inner's end.
         ("telegraf/#", "telegraf/rack1"),
+        # A '+' on BOTH sides matches exactly one complete level, so the
+        # remaining levels still decide: identical tails are covered.
+        ("telegraf/+/cpu", "telegraf/rack1/cpu"),
+        ("telegraf/+/+", "telegraf/rack1/cpu"),
         # Identity.
         ("telegraf/rack1/#", "telegraf/rack1/#"),
         ("telegraf/rack1/cpu", "telegraf/rack1/cpu"),
@@ -122,8 +126,10 @@ def test_mqtt_filter_covers_positive(outer: str, inner: str) -> None:
         ("telegraf/rack1/cpu", "telegraf/rack1/#"),
         # Asymmetric single-level wildcard: coverage depends on the
         # literal's runtime value, so it is soundly reported as unproven.
-        ("telegraf/+/cpu", "telegraf/rack1/cpu"),
         ("telegraf/rack1/cpu", "telegraf/+/cpu"),
+        # Two '+' levels do not make the levels below them irrelevant.
+        ("telegraf/+/mem", "telegraf/rack1/cpu"),
+        ("telegraf/+/cpu", "telegraf/rack1/+/mem"),
         # Empty inputs are not provable coverage.
         ("", "telegraf/#"),
         ("telegraf/#", ""),

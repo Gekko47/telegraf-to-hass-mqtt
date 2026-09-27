@@ -1,0 +1,40 @@
+{
+	"mcpServers": {
+		"context7": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"@upstash/context7-mcp"
+			],
+			"env": {
+				"DEFAULT_MINIMUM_TOKENS": ""
+			}
+		},
+		"filesystem": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"@modelcontextprotocol/server-filesystem",
+				"${workspaceFolder}"
+			],
+			"alwaysAllow": [
+				"directory_tree",
+				"list_directory",
+				"create_directory",
+				"read_multiple_files",
+				"read_text_file"
+			]
+		},
+		"git": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"@modelcontextprotocol/inspector",
+				"uvx",
+				"mcp-server-git",
+				"--repository",
+				"${workspaceFolder}"
+			]
+		}
+	}
+}

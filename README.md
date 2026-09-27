@@ -146,9 +146,10 @@ Two consequences worth knowing:
 
 - The scope is a **live MQTT subscription**. On a shared broker, keep it inside your own
   topic tree (e.g. `telegraf/mine/#`) rather than the default `telegraf/#`.
-- If the scope adds nothing beyond what `topic_pattern` already receives, a Repairs
-  issue warns you that the subscription is doing no work. Either widen the pattern or
-  narrow the scope.
+- If `topic_pattern` already covers the whole `auto_discover_scope`, a Repairs issue
+  warns you that the subscription is doing no work. Widen `auto_discover_scope` to
+  include topics the pattern does not already receive, narrow `topic_pattern`, or turn
+  `auto_discover` off.
 
 Changing `auto_discover` or its scope restarts the listener; the main subscription is
 untouched and no entity is lost.
@@ -175,10 +176,13 @@ candidates, so a permanently-silent host still has its identity entities until
 `delete_delay` retires the device itself.
 
 **Removal is reversible.** If a host comes back and starts publishing on its original
-topics, its entities are recreated automatically. Long recorder statistics survive a
-recreation, because the entity IDs are stable. If you *want* entities to persist
-indefinitely as unavailable rather than being removed, set `enable_cleanup` to `False` —
-availability is still tracked, only deletion stops.
+topics, its entities are recreated automatically. A returning host is not guaranteed the
+same entity ID, though: it comes back as a new device, and its ID is derived from the
+host tag and topic again. If the ID differs, the recreated entity is a new one, so
+dashboards referencing the old ID and the recorder history recorded against it may need
+attention. If you *want* entities to persist indefinitely as unavailable rather than
+being removed, set `enable_cleanup` to `False` — availability is still tracked, only
+deletion stops.
 
 ### Reconfigure
 

@@ -349,9 +349,16 @@ def _clean_options(
             return user_input[key]
         return stored.get(key, fallback)
 
+    # The scope is a free-text MQTT filter, so a submission can carry
+    # surrounding whitespace (a copy-paste, a trailing space from a
+    # mobile keyboard). Storing it verbatim would subscribe to a filter
+    # that never matches, and an all-whitespace value would store a
+    # string that passes ``str`` validation while being unusable.
+    auto_discover_scope = str(_get(CONF_AUTO_DISCOVER_SCOPE, DEFAULT_AUTO_DISCOVER_SCOPE)).strip()
+
     return {
         CONF_AUTO_DISCOVER: bool(_get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)),
-        CONF_AUTO_DISCOVER_SCOPE: str(_get(CONF_AUTO_DISCOVER_SCOPE, DEFAULT_AUTO_DISCOVER_SCOPE)),
+        CONF_AUTO_DISCOVER_SCOPE: auto_discover_scope or DEFAULT_AUTO_DISCOVER_SCOPE,
         CONF_DEVICE_ID_STRATEGY: str(_get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)),
         CONF_EXPIRE_AFTER: int(_get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER)),
         CONF_ENABLE_CLEANUP: bool(_get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),

@@ -640,8 +640,13 @@ class DeviceManager:
         # When this manager was built, so the "no traffic" Repairs hint can
         # give a brand-new entry a grace window before warning.
         self._started_at = self._clock()
-        self._seen_hosts: set[str] = set()
-        self._seen_topics: set[str] = set()
+        # Insertion-ordered maps used as bounded ordered sets: re-seeing a
+        # key moves it to the end, so ``next(iter(...))`` is the OLDEST
+        # entry and eviction is true FIFO. A plain ``set`` has no order at
+        # all, so ``set.pop()`` evicted an arbitrary element -- possibly
+        # the host the Repairs preview was about to name.
+        self._seen_hosts: dict[str, None] = {}
+        self._seen_topics: dict[str, None] = {}
         self.first_message_at: float | None = None
         self.last_message_at: float | None = None
         # Phase 10: track the inverse mapping (host tag -> set of
@@ -906,19 +911,23 @@ class DeviceManager:
             self.first_message_at = now
         self.last_message_at = now
         if host:
-            self._seen_hosts.add(host)
+            # Re-insert so the key moves to the newest position before the
+            # oldest is evicted below.
+            self._seen_hosts.pop(host, None)
+            self._seen_hosts[host] = None
             # Bounded: a broker with high-cardinality hosts must not grow
-            # this for the life of the entry. The set is only ever read as
-            # "have we seen any of these", never enumerated for
-            # completeness, so evicting the oldest is safe.
+            # this for the life of the entry. The collection is only ever
+            # read as "have we seen any of these", plus a short preview,
+            # so evicting the oldest is safe.
             while len(self._seen_hosts) > MAX_SEEN_HOSTS:
-                self._seen_hosts.pop()
+                del self._seen_hosts[next(iter(self._seen_hosts))]
         if topic:
-            self._seen_topics.add(topic)
+            self._seen_topics.pop(topic, None)
+            self._seen_topics[topic] = None
             # ``check_no_traffic`` renders a preview from the first few
-            # topics; nothing needs the set to be complete.
+            # topics; nothing needs the collection to be complete.
             while len(self._seen_topics) > MAX_SEEN_TOPICS:
-                self._seen_topics.pop()
+                del self._seen_topics[next(iter(self._seen_topics))]
 
     @property
     def device_id_strategy(self) -> str:

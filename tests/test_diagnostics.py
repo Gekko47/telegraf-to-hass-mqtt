@@ -174,7 +174,7 @@ def test_diagnostics_contains_every_spec_field() -> None:
     assert "device_name" not in data["config"]["data"]
     assert data["config"]["options"]["expire_after"] == 60
     # Option VALUES are not published wholesale either -- only the scalar
-    # knobs and key lists, because a field NAME can name a host.
+    # knobs and hashed key digests, because a field NAME can name a host.
     assert set(data["config"]["options"]) == {
         "expire_after",
         "enable_cleanup",
@@ -184,7 +184,9 @@ def test_diagnostics_contains_every_spec_field() -> None:
         "auto_discover",
         "auto_discover_scope",
         "device_id_strategy",
+        "field_override_key_count",
         "field_override_keys",
+        "category_override_key_count",
         "category_override_keys",
         "exclude_pattern_count",
     }

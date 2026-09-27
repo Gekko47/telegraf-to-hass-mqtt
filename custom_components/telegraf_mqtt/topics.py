@@ -128,11 +128,20 @@ def _covers_from(
             # ``inner`` is unbounded here, so only an unbounded ``outer``
             # can contain it.
             return outer_part == _MULTI_LEVEL
-        if outer_part == _SINGLE_LEVEL or inner_part == _SINGLE_LEVEL:
-            # One side is a single-level wildcard and the other is a literal.
-            # Coverage would depend on what the literal actually is, which
-            # the filters alone cannot tell us -- report "not proven".
-            return outer_part == _SINGLE_LEVEL and inner_part == _SINGLE_LEVEL
+        if outer_part == _SINGLE_LEVEL:
+            # ``+`` matches exactly one COMPLETE level, whatever it is, so
+            # an outer ``+`` covers an inner literal at this level. Both
+            # sides advance -- the levels below still have to line up,
+            # otherwise ``telegraf/+/mem`` would be reported as covering
+            # ``telegraf/rack1/cpu``.
+            outer_index += 1
+            inner_index += 1
+            continue
+        if inner_part == _SINGLE_LEVEL:
+            # The mirror image: an inner ``+`` matches any value at this
+            # level, and a literal ``outer`` only ever covers one of them,
+            # so coverage is not provable from the filters alone.
+            return False
         if outer_part != inner_part:
             return False
         outer_index += 1

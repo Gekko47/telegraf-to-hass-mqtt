@@ -59,15 +59,33 @@ def _redact_topic(topic: Any) -> str | None:
     if "/" not in stripped:
         # A single-segment topic carries no host information to redact.
         return topic
-    if "#" in topic or "+" in topic:
+    if "#" in stripped or "+" in stripped:
         # A subscription FILTER (``telegraf/rack1/#``), not an observed
-        # topic. It is the user's own configuration, it is not derived
-        # from broker traffic, and it embeds no host -- hashing it would
-        # only destroy the one field that tells a user which scope the
-        # entry is watching.
-        return topic
+        # topic. The wildcards and the namespace are the only parts a
+        # user needs to identify the scope, but a filter can still name a
+        # host as a literal segment (``telegraf/rack1/#``), so those
+        # segments are redacted exactly like an observed topic's.
+        return _redact_filter(stripped)
     root = stripped.split("/", 1)[0]
     return f"{root}/{hashlib.sha256(topic.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _redact_filter(stripped: str) -> str:
+    """Redact the host-bearing levels of a subscription filter.
+
+    ``telegraf/rack1/#`` becomes ``telegraf/<8-char digest>/#`` and
+    ``telegraf/+/cpu`` is returned unchanged: ``+`` and ``#`` are
+    wildcards, not host names, so preserving them keeps the one field
+    that tells a user which scope the entry is watching readable.
+    """
+    levels = stripped.split("/")
+    out = [levels[0]]
+    for level in levels[1:]:
+        if level in ("#", "+"):
+            out.append(level)
+        else:
+            out.append(hashlib.sha256(level.encode("utf-8")).hexdigest()[:8])
+    return "/".join(out)
 
 
 def _hash_device_id(device_id: str) -> str:
@@ -122,10 +140,26 @@ async def async_get_config_entry_diagnostics(
                 "delete_delay": entry.options.get(CONF_DELETE_DELAY),
                 "min_active_metrics": entry.options.get(CONF_MIN_ACTIVE_METRICS),
                 "auto_discover": entry.options.get("auto_discover"),
-                "auto_discover_scope": entry.options.get("auto_discover_scope"),
+                # The scope is a filter, not a scalar knob, and it can name
+                # a host as a literal level -- it gets the same redaction
+                # ``topic_pattern`` does.
+                "auto_discover_scope": _redact_topic(entry.options.get("auto_discover_scope")),
                 "device_id_strategy": entry.options.get("device_id_strategy"),
-                "field_override_keys": sorted((entry.options.get(CONF_FIELD_OVERRIDES) or {}).keys()),
-                "category_override_keys": sorted((entry.options.get("category_overrides") or {}).keys()),
+                # A field or ``unique_key`` can itself be a host name
+                # (``{"host": {...}}``), so the raw key lists are not
+                # published. The count says whether any are configured and
+                # the digests keep two downloads of the same config
+                # comparable without disclosing the names.
+                "field_override_key_count": len(entry.options.get(CONF_FIELD_OVERRIDES) or {}),
+                "field_override_keys": sorted(
+                    hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+                    for key in (entry.options.get(CONF_FIELD_OVERRIDES) or {})
+                ),
+                "category_override_key_count": len(entry.options.get("category_overrides") or {}),
+                "category_override_keys": sorted(
+                    hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+                    for key in (entry.options.get("category_overrides") or {})
+                ),
                 "exclude_pattern_count": len(entry.options.get("exclude_patterns") or []),
             },
         },

@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`+` in a topic filter is no longer treated as matching the rest of
+  the tree.** `mqtt_filter_covers` returned `True` for any pair of filters
+  that both used `+` at a level, so `telegraf/+/mem` was reported as
+  covering `telegraf/rack1/cpu` and the redundant-scope check could raise a
+  Repairs warning on a scope that genuinely adds hosts. A `+` now matches
+  exactly one complete level and the comparison continues through the
+  remaining levels. The direction is deliberately asymmetric: an outer `+`
+  covers an inner literal, a literal outer cannot cover an inner `+`.
+- **Seen hosts and topics are evicted oldest-first.** The bounded
+  host/topic collections were plain `set`s, so `set.pop()` removed an
+  arbitrary element -- a freshly-seen host could be dropped while a stale
+  one survived, and the `no_traffic` repair preview could name a host the
+  broker had stopped publishing. They are now insertion-ordered: a
+  re-seen key moves to the newest position and the oldest is evicted.
+- **Diagnostics no longer publish a subscription filter verbatim.**
+  `_redact_topic` returned any filter containing `#` or `+` unchanged on
+  the reasoning that a filter is the user's own configuration, but a
+  filter can name a host as a literal level (`telegraf/rack1/#`). Those
+  levels are now hashed while the namespace and the wildcards are kept,
+  so `telegraf/rack1/#` becomes `telegraf/<digest>/#` and
+  `telegraf/+/cpu` stays readable. `auto_discover_scope` is redacted the
+  same way instead of being copied raw.
+- **Diagnostics no longer publish override keys verbatim.** The
+  `field_override_keys` and `category_override_keys` lists published the
+  user's configured field names, and a field name can be a host name
+  (`{"host": {...}}`). Both are now sorted SHA-256 digests, joined by
+  `field_override_key_count` / `category_override_key_count` so a
+  download still says whether any are configured and two downloads of
+  the same config still compare equal.
+- **A whitespace-padded `auto_discover_scope` is no longer stored
+  verbatim.** The options flow stored the raw submission, so a trailing
+  space from a copy-paste or a mobile keyboard produced a stored filter
+  that never matches, and an all-whitespace value passed `str` validation
+  while being unusable. The value is stripped and falls back to the
+  documented default when empty.
+
+### Changed
+- README and the redundant-scope changelog entry no longer promise that
+  a returning host keeps its entity ID. Removal is still reversible, but
+  a host that comes back is rebuilt from its host tag and topic and may
+  get a different entity ID, so dashboards and recorded history may need
+  attention. The `enable_cleanup: false` option remains the way to keep
+  entities as unavailable instead of removing them.
+- The redundant-`auto_discover_scope` guidance now matches the shipped
+  Repairs card: widen `auto_discover_scope` to include topics
+  `topic_pattern` does not already receive, narrow `topic_pattern`, or
+  turn `auto_discover` off. The previous text said the opposite.
+
 ## [1.5.0] - 2026-09-14
 
 Minor, not patch: the entity lifecycle, the options flow, and
@@ -50,8 +99,10 @@ Minor, not patch: the entity lifecycle, the options flow, and
   shared broker, scope this to your own tree.
 - **Repairs issue for a redundant `auto_discover_scope`.** If the scope
   is fully covered by the entry's own topic pattern, the snoop can never
-  see anything new; a warning tells you to widen the pattern or narrow the
-  scope instead of leaving you with a subscription that does nothing.
+  see anything new; a warning points you at widening `auto_discover_scope`
+  to include topics the pattern does not already receive, narrowing
+  `topic_pattern`, or turning `auto_discover` off, instead of leaving you
+  with a subscription that does nothing.
 - **Reconfigure now pre-checks the broker.** Reconfiguring to a new topic
   pattern opens a short-lived subscription first and fails with a
   translated, actionable error if the broker refuses it, instead of
