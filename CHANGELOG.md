@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-27
+
+Patch: five defects found in review. No new options, no new entities, and
+nothing an existing user has to act on -- the one behavioural change is
+that the redundant-scope Repairs check stops warning on a scope that
+genuinely discovers new hosts.
+
 ### Fixed
 - **`+` in a topic filter is no longer treated as matching the rest of
   the tree.** `mqtt_filter_covers` returned `True` for any pair of filters
