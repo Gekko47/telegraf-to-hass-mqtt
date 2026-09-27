@@ -31,10 +31,10 @@ from custom_components.telegraf_mqtt.const import (
     CONF_SETUP_MODE,
     CONF_TOPIC_PATTERN,
     DEFAULT_AUTO_DISCOVER,
-    DEFAULT_AUTO_DISCOVER_PROBE_TOPIC,
+    DEFAULT_AUTO_DISCOVER_SCOPE,
     SETUP_MODE_DISCOVER,
 )
-from custom_components.telegraf_mqtt.snoop import SnoopListener, SnoopResult, derive_probe_topic
+from custom_components.telegraf_mqtt.snoop import SnoopListener, SnoopResult
 
 
 # ---------------------------------------------------------------------------
@@ -56,26 +56,85 @@ def test_default_auto_discover_is_false() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Probe-topic derivation (post-setup snoop)
+# Scan failure handling (M12)
 # ---------------------------------------------------------------------------
-def test_derive_probe_topic_returns_pattern_verbatim() -> None:
-    """The post-setup snoop probe never widens past the user pattern."""
-    assert derive_probe_topic("telegraf/rack1/#") == "telegraf/rack1/#"
-    assert derive_probe_topic("telegraf/+/cpu") == "telegraf/+/cpu"
-    assert derive_probe_topic("telegraf/#") == "telegraf/#"
 
 
-def test_derive_probe_topic_strips_whitespace() -> None:
-    assert derive_probe_topic("  telegraf/#  ") == "telegraf/#"
+def test_start_scan_returns_none_when_the_broker_refuses(monkeypatch) -> None:
+    """A broker that rejects the scan subscribe must not raise out of the
+    step.
 
-
-def test_derive_probe_topic_empty_falls_back_to_default() -> None:
-    """An empty pattern does not subscribe to everything -- we fall back
-    to the documented default so a corrupted entry cannot widen the
-    probe past the user intent.
+    The subscribe is a round-trip that can fail for reasons the user can
+    act on -- an ACL denying the probe root, a broker that is not up, a
+    filter the broker rejects. Letting the exception escape shows an
+    opaque stack trace in the UI and abandons the flow entirely.
     """
-    assert derive_probe_topic("") == DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
-    assert derive_probe_topic("   ") == DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
+    import homeassistant.components.mqtt as mqtt_module
+
+    async def _refusing_subscribe(_hass, _topic, _cb):
+        raise RuntimeError("ACL denies telegraf/#")
+
+    monkeypatch.setattr(mqtt_module, "async_subscribe", _refusing_subscribe)
+
+    flow = TelegrafMqttConfigFlow()
+    assert asyncio.run(flow._start_scan("telegraf/#", 30.0)) is None
+
+
+def test_scan_subscribe_failure_renders_a_translated_form_error(monkeypatch) -> None:
+    """The user lands back on the settings form with an actionable message
+    and keeps their input -- not on a traceback."""
+    import homeassistant.components.mqtt as mqtt_module
+
+    async def _refusing_subscribe(_hass, _topic, _cb):
+        raise RuntimeError("ACL denies telegraf/#")
+
+    monkeypatch.setattr(mqtt_module, "async_subscribe", _refusing_subscribe)
+
+    flow = TelegrafMqttConfigFlow()
+    flow._scan_duration = 30
+    result = asyncio.run(flow.async_step_scan_running())
+    assert result["type"] == "form"
+    assert result["step_id"] == "scan_settings"
+    assert result["errors"] == {"base": "scan_failed"}
+
+
+def test_scan_task_binds_its_duration_rather_than_reading_shared_state() -> None:
+    """L6: re-submitting the scan settings while a scan is live used to
+    re-show progress bound to the OLD task while that task's deadline and
+    progress bar read the NEW ``self._scan_duration``.
+
+    The two values are now bound at task creation, so a live task cannot
+    be re-pointed underneath itself.
+    """
+    import inspect
+
+    params = list(inspect.signature(TelegrafMqttConfigFlow._wait_for_scan).parameters)
+    assert params == ["self", "snoop", "duration", "root"]
+
+
+# ---------------------------------------------------------------------------
+# The auto-discover scope (post-setup snoop)
+# ---------------------------------------------------------------------------
+def test_default_auto_discover_scope_is_the_telegraf_tree() -> None:
+    """The scope is a named, documented default rather than something
+    derived from -- and therefore secretly equal to -- the entry's own
+    ``topic_pattern``.
+
+    This replaces the deleted ``derive_probe_topic``, which was the
+    identity function on the pattern: the snoop subscribed to exactly the
+    filter the main subscription already held and re-dispatched every
+    message. The scope is now independent of the pattern and explicit.
+    """
+    assert DEFAULT_AUTO_DISCOVER_SCOPE == "telegraf/#"
+
+
+def test_auto_discover_scope_default_is_independent_of_the_pattern() -> None:
+    """The two filters are separate settings, so widening one does not
+    silently change the other."""
+    from custom_components.telegraf_mqtt.const import CONF_AUTO_DISCOVER_SCOPE
+
+    assert DEFAULT_AUTO_DISCOVER_SCOPE != "telegraf/rack1/#"
+    assert CONF_AUTO_DISCOVER_SCOPE == "auto_discover_scope"
 
 
 # ---------------------------------------------------------------------------

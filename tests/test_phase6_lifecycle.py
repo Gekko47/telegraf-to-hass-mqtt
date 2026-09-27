@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
@@ -206,7 +206,7 @@ def test_healthy_device_removes_only_stale_metric_after_cleanup_delay() -> None:
     registry.get("cpu_usage_idle").last_updated = 299.0
     registry.last_any_metric = 299.0
     removed = manager.cleanup()
-    assert removed == ["server01:battery_percentage"]
+    assert removed == [("server01", "battery_percentage")]
     assert manager.get_metric("server01:cpu_usage_idle") is not None
     assert manager.get_metric("server01:battery_percentage") is None
 
@@ -291,9 +291,10 @@ def test_deleted_metric_reappearing_uses_same_unique_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_prune_empty_devices_removes_only_empty_and_expired() -> None:
-    """``prune_empty_devices`` drops a device only when (a) it has no
-    metrics left and (b) its last heartbeat is older than delete_delay.
+def test_prune_stale_devices_removes_only_silent_and_expired() -> None:
+    """``prune_stale_devices`` drops a device once its host has been
+    silent for longer than ``delete_delay``, regardless of how many
+    metrics the registry still holds.
     """
     clock = [0.0]
     manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
@@ -310,19 +311,26 @@ def test_prune_empty_devices_removes_only_empty_and_expired() -> None:
     empty.cleanup()  # removes battery_percentage
     assert len(empty) == 0
 
-    # The full device should never be pruned, no matter how old.
-    full.last_any_metric = 0.0  # ancient heartbeat
-    pruned = manager.prune_empty_devices()
-    # delete_delay=5; clock=200, last_any_metric=0 -> 200-0=200 > 5, yes
+    # A device that is STILL REPORTING is never pruned, however many
+    # metrics it holds. ``delete_delay`` is keyed on the heartbeat, not on
+    # emptiness -- that distinction is the fix for M14, where a
+    # never-pruned device held a device-cap slot forever.
+    full.last_any_metric = 199.0  # reported 1s ago at clock=200
+    pruned = manager.prune_stale_devices()
+    # delete_delay=5; clock=200. "gone" is at 0 (200s silent) -> pruned.
+    # "alive" is at 199 (1s silent) -> kept.
     assert pruned == ["gone"]
     assert "gone" not in manager.devices
     assert "alive" in manager.devices
-    # The full device survives even after the prune passes.
+    # Once "alive" also falls silent past delete_delay it IS pruned, even
+    # though its registry still holds a metric.
+    full.last_any_metric = 0.0
     clock[0] = 10_000.0
-    assert manager.prune_empty_devices() == []
+    assert manager.prune_stale_devices() == ["alive"]
+    assert "alive" not in manager.devices
 
 
-def test_prune_empty_devices_keeps_empty_but_fresh_devices() -> None:
+def test_prune_stale_devices_keeps_devices_with_a_fresh_heartbeat() -> None:
     """A device that just lost its last metric must NOT be pruned
     while its heartbeat is still inside ``delete_delay`` -- the gap
     might be transient before a new message arrives.
@@ -348,7 +356,7 @@ def test_prune_empty_devices_keeps_empty_but_fresh_devices() -> None:
     # recent clock value. delete_delay=5, clock=200, last_any_metric=200
     # -> 0s elapsed, well inside the delete_delay window.
     registry.last_any_metric = 200.0
-    assert manager.prune_empty_devices() == []
+    assert manager.prune_stale_devices() == []
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +502,7 @@ def test_min_active_metrics_does_not_block_when_floor_is_met() -> None:
     registry.get("cpu_usage_idle").last_updated = 299.0
     registry.get("mem_used_percent").last_updated = 299.0
     registry.last_any_metric = 299.0
-    assert manager.cleanup() == ["server01:battery_percentage"]
+    assert manager.cleanup() == [("server01", "battery_percentage")]
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +576,121 @@ def test_min_active_metrics_zero_disables_the_guard() -> None:
     registry.last_any_metric = 299.0
     # Guard is off; the single candidate is removed even though the
     # device would have 0 active metrics after.
-    assert manager.cleanup() == ["server01:battery_percentage"]
+    assert manager.cleanup() == [("server01", "battery_percentage")]
+
+
+# ---------------------------------------------------------------------------
+# ``available_count`` is a production input, not a test-only helper.
+# ``DeviceManager.cleanup`` consults it to decide whether a device is above
+# the ``min_active_metrics`` floor, and that decision is the difference
+# between a stale entity being removed from HA's entity registry and being
+# left in place. These two tests pin BOTH directions of that comparison on
+# the real cleanup path, so a regression that made ``available_count``
+# always 0 (or always ``len(registry)``) would fail here rather than
+# silently changing which entities the integration deletes.
+# ---------------------------------------------------------------------------
+
+
+def _seed_device(
+    manager: DeviceManager,
+    device_id: str,
+    live_fields: tuple[str, ...],
+    clock: list[float],
+) -> Any:
+    """Seed one device with ``live_fields`` staying available and a stale battery.
+
+    The battery is made stale by giving it an ancient ``last_updated``
+    *before* ``check_expiry`` runs, so only it flips to a Cleanup
+    Candidate. Setting ``last_updated`` after the check would be a no-op
+    -- availability is already latched False by then.
+    """
+    registry = manager.get_or_create_registry(device_id, device_id)
+    for field in live_fields:
+        registry.update(_descriptor(field))
+    registry.update(_descriptor("battery_percentage"))
+    # Fresh for the survivors, ancient for the candidate, at clock=200.
+    for field in live_fields:
+        registry.get(field).last_updated = 199.0
+    registry.get("battery_percentage").last_updated = 50.0
+    registry.last_any_metric = 100.0
+    clock[0] = 200.0
+    registry.check_expiry()
+    # Past cleanup_delay=1, with the survivors refreshed so the device
+    # heartbeat stays inside expire_after=5 and the device is not skipped
+    # by the *other* guard.
+    clock[0] = 300.0
+    for field in live_fields:
+        registry.get(field).last_updated = 299.0
+    registry.last_any_metric = 299.0
+    return registry
+
+
+def test_available_count_drives_the_production_cleanup_floor() -> None:
+    """``available_count`` is what the min_active_metrics floor reads.
+
+    Two devices, two different live counts, one threshold. The device with
+    fewer available metrics than the floor is skipped whole; the device at
+    the floor has its stale candidate removed. This exercises
+    ``DeviceManager.cleanup`` -- the function the periodic tick in
+    ``__init__`` actually calls -- so the assertion is about the decision
+    the integration makes, not about a helper returning a number.
+    """
+    clock = [100.0]
+    manager = DeviceManager(
+        expire_after=5,
+        cleanup_delay=1,
+        delete_delay=2,
+        # Floor of 2: a device with only 1 available metric is below it.
+        min_active_metrics=2,
+        clock=lambda: clock[0],
+    )
+    thin = _seed_device(manager, "thin", ("cpu_usage_idle",), clock)
+    fat = _seed_device(manager, "fat", ("cpu_usage_idle", "mem_used_percent"), clock)
+
+    # Precondition: both devices hold the same stale candidate and are
+    # equally past ``cleanup_delay``. The only difference between them is
+    # the live count, so the outcome split below is attributable to
+    # ``available_count`` alone -- a floor evaluated against the TOTAL
+    # metric count could not produce it, because the totals differ too.
+    assert thin.get("battery_percentage").cleanup_candidate_since == 200.0
+    assert fat.get("battery_percentage").cleanup_candidate_since == 200.0
+    assert thin.available_count == 1
+    assert fat.available_count == 2
+    assert len(thin) != len(fat), "the two devices must differ in total size too"
+
+    removed = manager.cleanup()
+
+    # Only the device at the floor loses its stale entity. The below-floor
+    # device is left completely alone -- the whole point of the guard, and
+    # the reason it reads the *available* count rather than the total.
+    assert removed == [("fat", "battery_percentage")]
+    assert manager.get_metric("fat:cpu_usage_idle") is not None
+    assert manager.get_metric("fat:battery_percentage") is None
+    # The skipped device kept its candidate, which is the observable
+    # consequence of the entity not being removed from HA's registry.
+    assert manager.get_metric("thin:battery_percentage") is not None
+
+
+def test_available_count_floor_is_disabled_at_zero() -> None:
+    """``min_active_metrics=0`` disables the floor entirely.
+
+    A device whose ``available_count`` is 1 still loses its candidate,
+    because ``1 < 0`` is false. This is the documented way to let cleanup
+    drain a device to zero, and it is the boundary case that a
+    ``<=``/``>=`` slip in the comparison would invert.
+    """
+    clock = [100.0]
+    manager = DeviceManager(
+        expire_after=5,
+        cleanup_delay=1,
+        delete_delay=2,
+        min_active_metrics=0,
+        clock=lambda: clock[0],
+    )
+    registry = _seed_device(manager, "server01", ("cpu_usage_idle",), clock)
+    assert registry.available_count == 1
+
+    assert manager.cleanup() == [("server01", "battery_percentage")]
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +821,7 @@ async def test_signal_remove_metric_drops_only_the_target_entity(hass: HomeAssis
     removed = manager.cleanup(
         on_write=lambda *_: None,
     )
-    assert "server01:battery_percentage" in removed
+    assert ("server01", "battery_percentage") in removed
     # The dispatcher listener registered in ``async_setup_entry`` is
     # a one-line wrapper around the module-level ``remove_metric_entity``.
     # Call it directly here so the test is deterministic (the periodic
@@ -707,7 +829,7 @@ async def test_signal_remove_metric_drops_only_the_target_entity(hass: HomeAssis
     # not under our control in the test harness).
     from custom_components.telegraf_mqtt import remove_metric_entity
 
-    assert remove_metric_entity(hass, "server01:battery_percentage") is True
+    assert remove_metric_entity(hass, "server01", "battery_percentage") is True
     await hass.async_block_till_done()
     # Re-collect after cleanup: the battery entity should be gone.
     by_unique_after = {e.unique_id: e for e in entity_registry.entities.values() if e.platform == DOMAIN}
@@ -731,7 +853,7 @@ def test_remove_metric_entity_returns_false_when_er_is_none(monkeypatch: pytest.
 
     integration = importlib.import_module("custom_components.telegraf_mqtt")
     monkeypatch.setattr(integration, "er", None)
-    assert integration.remove_metric_entity(hass=None, composite_key="x:y") is False
+    assert integration.remove_metric_entity(hass=None, device_id="x", unique_key="y") is False
 
 
 def test_remove_metric_entity_returns_false_when_no_match(
@@ -753,6 +875,9 @@ def test_remove_metric_entity_returns_false_when_no_match(
     class _Empty:
         entities: ClassVar[dict] = {}
 
+        def async_get_entity_id(self, platform: str, domain: str, unique_id: str) -> None:
+            return None
+
     def _async_get(_hass: object) -> _Empty:
         # ``entity_registry.async_get(hass)`` is sync in real HA despite
         # the ``async_`` prefix; the helper just looks up the singleton.
@@ -760,7 +885,7 @@ def test_remove_metric_entity_returns_false_when_no_match(
 
     fake.async_get = _async_get
     monkeypatch.setattr(integration, "er", fake)
-    assert integration.remove_metric_entity(hass=object(), composite_key="x:y") is False
+    assert integration.remove_metric_entity(hass=object(), device_id="x", unique_key="y") is False
 
 
 def test_prune_empty_devices_emits_info_log(caplog) -> None:
@@ -780,7 +905,7 @@ def test_prune_empty_devices_emits_info_log(caplog) -> None:
     registry.cleanup()  # remove the metric
     clock[0] = 1_000.0
     with caplog.at_level(logging.INFO, logger="custom_components.telegraf_mqtt.registry"):
-        pruned = manager.prune_empty_devices()
+        pruned = manager.prune_stale_devices()
     assert pruned == ["drained"]
     assert any("drained" in rec.getMessage() for rec in caplog.records)
 
@@ -807,7 +932,7 @@ def test_listener_remove_metric_returns_noop_when_dispatcher_is_none(
 
 
 def test_listener_remove_metric_registers_via_real_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The listener body is ``remove_metric_entity(hass, unique_key)``;
+    """The listener body is ``remove_metric_entity(hass, device_id, unique_key)``;
     the registration passes an async listener to ``async_dispatcher_connect``.
     Drive the captured listener end-to-end to cover the body.
     """
@@ -838,6 +963,9 @@ def test_listener_remove_metric_registers_via_real_dispatcher(monkeypatch: pytes
     class _Empty:
         entities: ClassVar[dict] = {}
 
+        def async_get_entity_id(self, platform: str, domain: str, unique_id: str) -> None:
+            return None
+
     def _async_get(_hass):
         return _Empty()
 
@@ -846,7 +974,176 @@ def test_listener_remove_metric_registers_via_real_dispatcher(monkeypatch: pytes
     monkeypatch.setattr(integration, "er", fake_er)
     # The captured target is async; running it via asyncio.run is the
     # simplest way to drive the body without the rest of the harness.
-    asyncio.run(captured["target"]("server01:net_eth0_link_up"))
+    asyncio.run(captured["target"]("server01", "net_eth0_link_up"))
+
+
+# ---------------------------------------------------------------------------
+# WS-J (M14): ``delete_delay`` actually cleans.
+#
+# Every test below fails against the pre-fix implementation, where
+# ``prune_empty_devices`` required ``len(registry) == 0`` -- a condition no
+# code path could reach for a silent host, because ``cleanup`` skips
+# stale-heartbeat devices AND devices below ``min_active_metrics``, and a
+# host that stops publishing trips both guards at once.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_delay_retires_a_silent_host_holding_metrics() -> None:
+    """The headline M14 case: a host that stops publishing is cleaned up.
+
+    The registry still holds three metrics and its heartbeat is ancient.
+    ``delete_delay`` must retire the whole device and report every entity
+    it held so the integration can delete them.
+    """
+    clock = [0.0]
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
+    registry = manager.get_or_create_registry("departed", "departed")
+    for field in ("cpu_usage_idle", "used_percent", "free"):
+        registry.update(_descriptor(field))
+
+    clock[0] = 1_000.0
+    removed_entities: list[tuple[str, str]] = []
+    pruned = manager.prune_stale_devices(on_remove=lambda d, u: removed_entities.append((d, u)))
+
+    assert pruned == ["departed"]
+    assert "departed" not in manager.devices
+    assert sorted(removed_entities) == [
+        ("departed", "cpu_usage_idle"),
+        ("departed", "free"),
+        ("departed", "used_percent"),
+    ]
+
+
+def test_delete_delay_respects_a_fresh_heartbeat() -> None:
+    """A still-reporting host is never retired, however stale its metrics."""
+    clock = [0.0]
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=5, clock=lambda: clock[0])
+    registry = manager.get_or_create_registry("alive", "alive")
+    registry.update(_descriptor("cpu_usage_idle"))
+
+    clock[0] = 1_000.0
+    registry.last_any_metric = 999.0
+    assert manager.prune_stale_devices() == []
+    assert "alive" in manager.devices
+
+
+def test_delete_delay_does_not_fire_before_the_window() -> None:
+    """Inside the window nothing is retired."""
+    clock = [0.0]
+    manager = DeviceManager(expire_after=10, cleanup_delay=1, delete_delay=100, clock=lambda: clock[0])
+    manager.get_or_create_registry("recent", "recent").update(_descriptor("cpu_usage_idle"))
+
+    clock[0] = 50.0
+    assert manager.prune_stale_devices() == []
+
+
+def test_enable_cleanup_false_also_disables_device_pruning() -> None:
+    """``enable_cleanup: false`` means "delete nothing" -- devices included.
+
+    ``prune_empty_devices`` used to ignore this flag entirely, which
+    contradicted the docstring on ``cleanup`` ("keeps every metric in every
+    device forever") and surprised any user who turned cleanup off.
+    """
+    clock = [0.0]
+    manager = DeviceManager(
+        expire_after=10,
+        cleanup_delay=1,
+        delete_delay=5,
+        enable_cleanup=False,
+        clock=lambda: clock[0],
+    )
+    manager.get_or_create_registry("departed", "departed").update(_descriptor("cpu_usage_idle"))
+
+    clock[0] = 1_000.0
+    assert manager.prune_stale_devices() == []
+    assert "departed" in manager.devices
+
+
+def test_departed_hosts_do_not_consume_the_device_cap() -> None:
+    """M14's user-visible payoff: the cap regression scenario.
+
+    60 hosts are observed over time, 20 of the 50 tracked ones later depart
+    for good and sit past ``delete_delay``, and a 51st *live* host then
+    shows up. Without pruning, the 20 corpses still occupy device-cap slots
+    and the live host is silently dropped with no error.
+    """
+    clock = [0.0]
+    manager = DeviceManager(max_devices=50, delete_delay=60, clock=lambda: clock[0])
+
+    for i in range(60):
+        clock[0] = float(i)
+        manager.get_or_create_registry(f"host{i:02d}", f"host{i:02d}")
+    assert len(manager.devices) == 50, "cap enforced while every host is live"
+    assert manager.dropped_device_count == 10
+
+    # 20 of the 50 known hosts go away for good; the other 30 keep
+    # reporting, so their heartbeats must be refreshed or they would be
+    # retired for exactly the same reason we are retiring the other 20.
+    departed = [f"host{i:02d}" for i in range(20)]
+    clock[0] = 10_000.0
+    for device_id, registry in manager.devices.items():
+        registry.last_any_metric = 0.0 if device_id in departed else 9_999.0
+
+    dropped_before = manager.dropped_device_count
+    manager.prune_stale_devices()
+
+    assert len(manager.devices) == 30, "the 20 departed hosts should have been retired"
+    assert manager.dropped_device_count == dropped_before
+
+    # A live host now arrives with room to spare -- it must be accepted.
+    clock[0] = 10_001.0
+    registry = manager.get_or_create_registry("brand_new_live_host", "brand_new_live_host")
+    assert registry is not None, "a live host was dropped even though 20 slots were freed"
+    assert manager.dropped_device_count == dropped_before, "the new host must not be counted as dropped"
+
+
+def test_pruned_device_reappears_on_the_next_message() -> None:
+    """A retired host that comes back gets a fresh registry, not an error."""
+    clock = [0.0]
+    manager = DeviceManager(delete_delay=5, clock=lambda: clock[0])
+    manager.get_or_create_registry("flapping", "flapping").update(_descriptor("cpu_usage_idle"))
+
+    clock[0] = 1_000.0
+    assert manager.prune_stale_devices() == ["flapping"]
+
+    clock[0] = 1_001.0
+    registry = manager.get_or_create_registry("flapping", "flapping")
+    assert registry is not None
+    assert len(registry) == 0
+
+
+def test_cleanup_returns_device_and_key_separately() -> None:
+    """``cleanup`` yields a real 2-tuple, not a re-joinable composite string.
+
+    The composite form had to be split apart downstream to rebuild the
+    entity ``unique_id``, which mis-split any ``unique_key`` containing a
+    ``:``. A ``unique_key`` that actually contains a colon must survive --
+    that is the case the old string surgery got wrong.
+    """
+    clock = [0.0]
+    # min_active_metrics=0 so the device floor does not block the single
+    # (now-unavailable) metric from being cleaned -- this test is about the
+    # shape of the returned key, not about the floor.
+    manager = DeviceManager(
+        expire_after=10,
+        cleanup_delay=0,
+        min_active_metrics=0,
+        clock=lambda: clock[0],
+    )
+    registry = manager.get_or_create_registry("server01", "server01")
+    registry.update(_descriptor("net:eth0:link_up"))
+
+    # Expire the metric so it becomes a cleanup candidate, then step the
+    # clock past ``cleanup_delay`` (the comparison is strict ``>``) while
+    # keeping the DEVICE's heartbeat fresh -- otherwise ``cleanup`` skips
+    # the whole device as offline and returns nothing.
+    clock[0] = 1_000.0
+    registry.check_expiry()
+    clock[0] = 1_001.0
+    registry.last_any_metric = 1_000.0
+    removed = manager.cleanup()
+
+    assert removed == [("server01", "net:eth0:link_up")]
 
 
 # NOTE: a real-subscribe-failure-after-probe test was attempted but

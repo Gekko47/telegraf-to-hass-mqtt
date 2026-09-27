@@ -146,7 +146,7 @@ def _run_sensor_assertions(sensor_module) -> None:
         exclude_patterns=("mem_*",),
         field_overrides={"used_percent": {"native_unit": "%"}},
     )
-    entity._handle_metric_updated("host1:mem_used_percent")
+    entity.handle_metric_updated("host1:mem_used_percent")
 
     assert entity.available is False
     assert entity.native_value == 41.2

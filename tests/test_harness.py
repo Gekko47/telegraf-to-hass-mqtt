@@ -28,6 +28,7 @@ from telegraf_mqtt code.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from homeassistant.const import __version__ as HA_VERSION
@@ -102,10 +103,26 @@ def _domain_entity_entries(hass: HomeAssistant) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _hacs_floor() -> tuple[int, int]:
+    """Return the ``(major, minor)`` floor declared in ``hacs.json``."""
+    hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
+    major, minor, _patch = hacs["homeassistant"].split(".", 2)
+    return int(major), int(minor)
+
+
 async def test_hass_fixture_boots(hass) -> None:
-    """The hass fixture starts a real Home Assistant test instance."""
+    """The hass fixture starts a real Home Assistant test instance.
+
+    The assertion is a *floor* check, not an exact-version check: the point
+    is that the harness runs an HA at or above the version the integration
+    declares in ``hacs.json`` (2026.6.0). Pinning an exact patch version
+    broke the moment CI picked up a newer HA release, which is a property
+    of the test environment rather than of the integration.
+    """
     assert hass.is_running
-    assert HA_VERSION == "2026.6.4"  # matches hacs.json floor (2026.6.x)
+    installed = tuple(int(part) for part in HA_VERSION.split(".")[:2])
+    floor = _hacs_floor()
+    assert installed >= floor, f"HA {HA_VERSION} is below the declared floor {'.'.join(map(str, (*floor, 0)))}"
 
 
 async def test_telegraf_mqtt_integration_is_loadable(hass, enable_custom_integrations) -> None:

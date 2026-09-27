@@ -11,6 +11,7 @@ regressions those stubs prevent.
 import enum
 import importlib
 import json
+import re
 import sys
 import types
 from dataclasses import dataclass
@@ -250,6 +251,115 @@ def test_boolean_metric_is_exposed_as_binary_sensor(monkeypatch) -> None:
             sys.modules.pop(module_name, None)
         else:
             sys.modules[module_name] = saved_module
+
+
+def test_every_used_translation_key_is_defined() -> None:
+    """Every translation key the code actually uses must exist in ``strings.json``.
+
+    WS-D's durable guard. Three Repairs issues shipped as broken cards in
+    Settings -> Repairs because ``repairs.py`` inlined its ``translation_key``
+    literals while ``strings.json`` never defined ``no_traffic_on_topic``,
+    ``device_id_collision`` or ``device_id_conflict``. Nothing in CI noticed:
+    a 100%-line-coverage suite still renders nothing.
+
+    This test closes the loop by cross-checking the two sides. It reads the
+    Repairs translation keys from ``const.REPAIR_*`` (the single source of
+    truth, now actually used by ``repairs.py``) plus the abort/error keys the
+    config flow can return, and asserts each resolves.
+    """
+    strings = json.loads(Path("custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
+
+    from custom_components.telegraf_mqtt import const
+
+    # Discover the REPAIR_* constants instead of listing them. A
+    # hand-kept tuple is a list that silently goes stale: the eighth
+    # issue added in WS-I (``auto_discover_scope_redundant``) would have
+    # shipped with a broken Repairs card while this test stayed green,
+    # because nothing reminded the test author to append it. Deriving the
+    # set from the module means a NEW issue is covered the moment the
+    # constant is defined, and removing the constant removes the
+    # assertion.
+    repair_keys = sorted(name for name in dir(const) if name.startswith("REPAIR_"))
+    assert len(repair_keys) >= 8, f"expected the full set of Repairs issues, found {repair_keys}"
+
+    issues = strings["issues"]
+    for const_name in repair_keys:
+        name = getattr(const, const_name)
+        assert name in issues, f"Repairs issue {name!r} ({const_name}) has no strings.json entry"
+        assert "title" in issues[name], f"issue {name!r} needs a title"
+        assert "description" in issues[name], f"issue {name!r} needs a description"
+
+    # Every ``issues.*`` key in strings.json must be a real REPAIR_*
+    # constant, and vice versa: catches both a forgotten constant and a
+    # stale string left behind after an issue was removed.
+    const_values = {getattr(const, name) for name in repair_keys}
+    assert set(issues) == const_values, (
+        f"strings.json issues {sorted(set(issues) ^ const_values)} "
+        "do not match the REPAIR_* constants in both directions"
+    )
+
+    # Every abort reason the flows can return.
+    for reason in ("already_configured", "reconfigure_successful", "cannot_connect"):
+        assert reason in strings["config"]["abort"], f"missing config.abort.{reason}"
+
+    # Every form-error key the config flow can return, discovered from the
+    # source rather than hand-listed, for the same reason as the REPAIR_*
+    # constants above. Both call shapes are matched: the literal
+    # ``errors={"base": "key"}`` and the per-field
+    # ``errors={CONF_X: "key"}``. This is what caught
+    # ``config.error.cannot_connect``: the reconfigure pre-flight returns
+    # it, but the string was never added, so a user whose broker refused
+    # the new pattern saw the raw key instead of an explanation.
+    flow_source = Path("custom_components/telegraf_mqtt/config_flow.py").read_text(encoding="utf-8")
+    used_errors = set(re.findall(r'errors=\{\s*"base":\s*"([a-z_]+)"', flow_source))
+    used_errors |= set(re.findall(r'errors=\{[A-Za-z_][A-Za-z0-9_.]*:\s*"([a-z_]+)"', flow_source))
+    # Error keys also come from the validators that BUILD the errors dict
+    # and return it, so pick those up too.
+    used_errors |= set(re.findall(r'errors\[[A-Za-z_][A-Za-z0-9_.]*\]\s*=\s*"([a-z_]+)"', flow_source))
+    used_errors |= set(re.findall(r'errors\.setdefault\([^,]+,\s*"([a-z_]+)"', flow_source))
+    assert used_errors, "failed to discover any form-error keys in config_flow.py"
+    for error in sorted(used_errors):
+        assert error in strings["config"]["error"], f"config.error.{error} is used by the flow but undefined"
+
+    # The exception messages that surface to the user.
+    for exc in ("mqtt_broker_unreachable", "reconfigure_subscribe_failed", "missing_topic_pattern"):
+        assert exc in strings["exceptions"], f"exceptions.{exc} is raised in production but undefined"
+
+
+def test_options_form_fields_are_all_labelled() -> None:
+    """Every option in the options-flow schema needs a label in ``strings.json``.
+
+    ``auto_discover`` and ``device_id_strategy`` shipped with no ``data`` entry,
+    so the UI rendered the raw option key instead of a description.
+    """
+    strings = json.loads(Path("custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8"))
+    labels = strings["config"]["step"]["options"]["data"]
+
+    for key in (
+        "auto_discover",
+        "auto_discover_scope",
+        "device_id_strategy",
+        "expire_after",
+        "enable_cleanup",
+        "cleanup_delay",
+        "delete_delay",
+        "min_active_metrics",
+        "exclude_patterns",
+        "field_overrides",
+        "category_overrides",
+    ):
+        assert key in labels, f"options field {key!r} has no label in strings.json"
+
+
+def test_translation_mirrors_stay_identical() -> None:
+    """``strings.json`` and ``translations/en.json`` are byte-identical mirrors.
+
+    They are maintained as one document. A test that only checked the presence
+    of a few keys would not catch one file being edited alone.
+    """
+    strings = Path("custom_components/telegraf_mqtt/strings.json").read_text(encoding="utf-8")
+    en = Path("custom_components/telegraf_mqtt/translations/en.json").read_text(encoding="utf-8")
+    assert strings == en, "strings.json and translations/en.json have drifted apart"
 
 
 def test_manifest_and_translations_are_release_ready() -> None:

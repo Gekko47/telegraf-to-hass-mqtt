@@ -25,7 +25,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -35,6 +35,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_AUTO_DISCOVER,
+    CONF_AUTO_DISCOVER_SCOPE,
     CONF_CATEGORY_OVERRIDES,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
@@ -52,6 +53,7 @@ from .const import (
     CONF_SW_VERSION,
     CONF_TOPIC_PATTERN,
     DEFAULT_AUTO_DISCOVER,
+    DEFAULT_AUTO_DISCOVER_SCOPE,
     DEFAULT_CLEANUP_DELAY,
     DEFAULT_DELETE_DELAY,
     DEFAULT_DEVICE_ID_STRATEGY,
@@ -65,11 +67,13 @@ from .const import (
     DOMAIN,
     MAX_SCAN_DURATION_SECONDS,
     MIN_SCAN_DURATION_SECONDS,
+    RECONFIGURE_PREFLIGHT_TIMEOUT_SECONDS,
     SETUP_MODE_DISCOVER,
     SETUP_MODE_MANUAL,
     VALID_DEVICE_ID_STRATEGIES,
     VALID_PLATFORM_HINTS,
 )
+from .exceptions import ReconfigureSubscribeFailed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -270,19 +274,30 @@ def _build_options_schema(current_options: Mapping[str, Any]) -> vol.Schema:
     - Cleanup lifecycle.
     - Filter / override: ``exclude_patterns``, ``field_overrides``,
       and the per-entity ``category_overrides`` map.
+
+    Every field pre-fills from ``current_options``. This is load-bearing,
+    not cosmetic: ``_clean_options`` persists whatever the form returns, so
+    a field that defaults to a *constant* rather than the *current* value is
+    silently reset to that constant the moment the user saves the dialog
+    after touching anything else.
     """
     enable_cleanup = current_options.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)
     cleanup_delay = current_options.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)
     delete_delay = current_options.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)
     min_active_metrics = current_options.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)
     auto_discover = current_options.get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)
+    auto_discover_scope = current_options.get(CONF_AUTO_DISCOVER_SCOPE, DEFAULT_AUTO_DISCOVER_SCOPE)
     device_id_strategy = current_options.get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)
     category_overrides = current_options.get(CONF_CATEGORY_OVERRIDES, {})
+    expire_after = current_options.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER)
+    exclude_patterns = list(current_options.get(CONF_EXCLUDE_PATTERNS, []))
+    field_overrides = dict(current_options.get(CONF_FIELD_OVERRIDES, {}))
     non_negative_int = vol.All(int, vol.Range(min=0))
 
     return vol.Schema(
         {
             vol.Optional(CONF_AUTO_DISCOVER, default=auto_discover): bool,
+            vol.Optional(CONF_AUTO_DISCOVER_SCOPE, default=auto_discover_scope): str,
             vol.Optional(CONF_DEVICE_ID_STRATEGY, default=device_id_strategy): selector.SelectSelector(
                 selector.SelectSelectorConfig(
                     options=[
@@ -291,12 +306,12 @@ def _build_options_schema(current_options: Mapping[str, Any]) -> vol.Schema:
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
-            vol.Optional(CONF_EXPIRE_AFTER, default=DEFAULT_EXPIRE_AFTER): vol.All(int, vol.Range(min=1)),
+            vol.Optional(CONF_EXPIRE_AFTER, default=expire_after): vol.All(int, vol.Range(min=1)),
             vol.Optional(CONF_ENABLE_CLEANUP, default=enable_cleanup): bool,
             vol.Optional(CONF_CLEANUP_DELAY, default=cleanup_delay): non_negative_int,
             vol.Optional(CONF_DELETE_DELAY, default=delete_delay): non_negative_int,
             vol.Optional(CONF_MIN_ACTIVE_METRICS, default=min_active_metrics): non_negative_int,
-            vol.Optional(CONF_EXCLUDE_PATTERNS, default=[]): selector.SelectSelector(
+            vol.Optional(CONF_EXCLUDE_PATTERNS, default=exclude_patterns): selector.SelectSelector(
                 selector.SelectSelectorConfig(
                     options=[],
                     custom_value=True,
@@ -304,30 +319,48 @@ def _build_options_schema(current_options: Mapping[str, Any]) -> vol.Schema:
                     mode=selector.SelectSelectorMode.LIST,
                 )
             ),
-            vol.Optional(CONF_FIELD_OVERRIDES, default={}): selector.ObjectSelector(),
+            vol.Optional(CONF_FIELD_OVERRIDES, default=field_overrides): selector.ObjectSelector(),
             vol.Optional(CONF_CATEGORY_OVERRIDES, default=category_overrides): selector.ObjectSelector(),
         }
     )
 
 
-def _clean_options(user_input: dict[str, Any]) -> dict[str, Any]:
+def _clean_options(
+    user_input: dict[str, Any],
+    current_options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Normalize user input from the options flow before persisting.
 
     Phase 10: ``CONF_CATEGORY_OVERRIDES`` is an ObjectSelector result;
     the user can leave it as ``{}``, so we coerce the empty form value
     back to an empty dict.
+
+    ``current_options`` is the entry's stored options. Any key the client
+    omitted from the submission falls back to the *stored* value rather
+    than to the compiled-in default, so a partially-rendered form (or a
+    client that drops a field) can never silently reset a setting the
+    user did not touch. The schema pre-fills from the same source, so in
+    the normal path the two mechanisms agree.
     """
+    stored: Mapping[str, Any] = current_options or {}
+
+    def _get(key: str, fallback: Any) -> Any:
+        if key in user_input:
+            return user_input[key]
+        return stored.get(key, fallback)
+
     return {
-        CONF_AUTO_DISCOVER: bool(user_input.get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)),
-        CONF_DEVICE_ID_STRATEGY: str(user_input.get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)),
-        CONF_EXPIRE_AFTER: int(user_input.get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER)),
-        CONF_ENABLE_CLEANUP: bool(user_input.get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),
-        CONF_CLEANUP_DELAY: int(user_input.get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)),
-        CONF_DELETE_DELAY: int(user_input.get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)),
-        CONF_MIN_ACTIVE_METRICS: int(user_input.get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)),
-        CONF_EXCLUDE_PATTERNS: list(user_input.get(CONF_EXCLUDE_PATTERNS, [])),
-        CONF_FIELD_OVERRIDES: dict(user_input.get(CONF_FIELD_OVERRIDES, {})),
-        CONF_CATEGORY_OVERRIDES: dict(user_input.get(CONF_CATEGORY_OVERRIDES, {})),
+        CONF_AUTO_DISCOVER: bool(_get(CONF_AUTO_DISCOVER, DEFAULT_AUTO_DISCOVER)),
+        CONF_AUTO_DISCOVER_SCOPE: str(_get(CONF_AUTO_DISCOVER_SCOPE, DEFAULT_AUTO_DISCOVER_SCOPE)),
+        CONF_DEVICE_ID_STRATEGY: str(_get(CONF_DEVICE_ID_STRATEGY, DEFAULT_DEVICE_ID_STRATEGY)),
+        CONF_EXPIRE_AFTER: int(_get(CONF_EXPIRE_AFTER, DEFAULT_EXPIRE_AFTER)),
+        CONF_ENABLE_CLEANUP: bool(_get(CONF_ENABLE_CLEANUP, DEFAULT_ENABLE_CLEANUP)),
+        CONF_CLEANUP_DELAY: int(_get(CONF_CLEANUP_DELAY, DEFAULT_CLEANUP_DELAY)),
+        CONF_DELETE_DELAY: int(_get(CONF_DELETE_DELAY, DEFAULT_DELETE_DELAY)),
+        CONF_MIN_ACTIVE_METRICS: int(_get(CONF_MIN_ACTIVE_METRICS, DEFAULT_MIN_ACTIVE_METRICS)),
+        CONF_EXCLUDE_PATTERNS: list(_get(CONF_EXCLUDE_PATTERNS, [])),
+        CONF_FIELD_OVERRIDES: dict(_get(CONF_FIELD_OVERRIDES, {})),
+        CONF_CATEGORY_OVERRIDES: dict(_get(CONF_CATEGORY_OVERRIDES, {})),
     }
 
 
@@ -343,12 +376,37 @@ class TelegrafMqttOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show the multi-section options form."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=_clean_options(user_input))
+            scope_error = self._validate_scope(user_input)
+            if scope_error is not None:
+                # Re-show the form with the scope field flagged rather
+                # than persisting a filter the broker would reject: the
+                # snoop subscribes to it directly, so a bad value here is
+                # a broken second subscription, not a cosmetic typo.
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=_build_options_schema(self.config_entry.options),
+                    errors={CONF_AUTO_DISCOVER_SCOPE: scope_error},
+                )
+            return self.async_create_entry(
+                title="",
+                data=_clean_options(user_input, self.config_entry.options),
+            )
 
         return self.async_show_form(
             step_id="init",
             data_schema=_build_options_schema(self.config_entry.options),
         )
+
+    def _validate_scope(self, user_input: dict[str, Any]) -> str | None:
+        """Return an error key for an invalid ``auto_discover_scope``, else None."""
+        if CONF_AUTO_DISCOVER_SCOPE not in user_input:
+            # Field omitted from the submission; ``_clean_options`` falls
+            # back to the stored value, which is already trusted.
+            return None
+        scope = str(user_input[CONF_AUTO_DISCOVER_SCOPE] or "").strip()
+        if not _valid_subscription_topic(scope):
+            return "invalid_topic"
+        return None
 
 
 class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -368,7 +426,11 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     topic pattern changes.
     """
 
-    VERSION = 1
+    # v2: options gained ``auto_discover_scope``, and every option key is
+    # backfilled from its default so a sparse ``entry.options`` becomes
+    # explicit. See ``__init__.async_migrate_entry``.
+    VERSION = 2
+    MINOR_VERSION = 1
 
     # Per-flow scan state. The snoop listener is held so the running
     # step can wait on its auto-stop timer; the seen topics persist
@@ -437,8 +499,15 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             topic_pattern = user_input[CONF_TOPIC_PATTERN]
-            device_name = _clean(user_input[CONF_DEVICE_NAME])
-            assert device_name is not None  # guarded by _validate above
+            # ``_clean`` returns ``str | None``, but ``_validate`` above has
+            # already rejected every input it returns ``None`` for, so the
+            # narrowing here is a restatement of that check rather than a
+            # second, unreachable branch. An earlier revision used an
+            # ``assert`` and then an explicit ``if ... is None: show_form``;
+            # neither could ever run, because ``errors`` is non-empty for
+            # exactly those inputs. ``cast`` records the invariant without
+            # adding a statement that can never be covered or reached.
+            device_name = cast(str, _clean(user_input[CONF_DEVICE_NAME]))
             await self.async_set_unique_id(topic_pattern)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
@@ -547,9 +616,24 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # First (re-)entry: launch the background scan-wait task.
         snoop = await self._start_scan(self._scan_root, float(self._scan_duration))
+        if snoop is None:
+            # The broker refused the scan subscription. ``_start_scan``
+            # has already logged the reason; send the user back to the
+            # settings form with a translated error instead of showing a
+            # stack trace and abandoning the flow.
+            return self.async_show_form(
+                step_id="scan_settings",
+                data_schema=_scan_settings_schema(),
+                errors={"base": "scan_failed"},
+            )
         self._scan_snoop = snoop
         self._scan_start_time = monotonic()
-        self._scan_task = self.hass.async_create_task(self._wait_for_scan(snoop))
+        # Bind duration/root at task creation, not inside the task: a second
+        # scan overwriting ``self._scan_duration`` mid-flight must not change
+        # how the *first* task's progress bar and deadline are computed.
+        self._scan_task = self.hass.async_create_task(
+            self._wait_for_scan(snoop, float(self._scan_duration), self._scan_root),
+        )
         return self.async_show_progress(
             step_id="scan_running",
             progress_action="scan_running",
@@ -560,7 +644,7 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             progress_task=self._scan_task,
         )
 
-    async def _wait_for_scan(self, snoop: Any) -> Any:
+    async def _wait_for_scan(self, snoop: Any, duration: float, root: str) -> Any:
         """Wait for the snoop's auto-stop timer, emitting progress.
 
         Returns the ``SnoopResult`` from ``snoop.stop()``. Emits
@@ -570,8 +654,17 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         (``duration + 5s``) force-stops the snoop if the auto-stop
         timer misfires, so the broker subscription cannot outlive the
         flow.
+
+        ``duration`` and ``root`` are passed in rather than read off
+        ``self``. A user who goes back and changes the scan window
+        re-enters this step; the previously-created task is still live
+        and was reading ``self._scan_duration`` -- so it would report
+        progress against the *new* window while its own deadline had been
+        computed from the *old* one, and the old task's ``_scan_result``
+        would race the new one. Binding both values at task creation
+        removes the shared mutable state entirely.
         """
-        deadline = float(self._scan_duration) + 5.0
+        deadline = float(duration) + 5.0
         last_percent = -1
         try:
             async with asyncio.timeout(deadline):
@@ -585,13 +678,13 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 while not snoop.is_finished:
                     await asyncio.sleep(0.1)
                     elapsed = monotonic() - self._scan_start_time
-                    progress = min(1.0, elapsed / float(self._scan_duration))
+                    progress = min(1.0, elapsed / float(duration))
                     percent = int(progress * 100)
                     if percent != last_percent:
                         self.async_update_progress(progress)
                         last_percent = percent
         except TimeoutError:
-            _LOGGER.debug("Scan for %s exceeded deadline; stopping snoop", self._scan_root)
+            _LOGGER.debug("Scan for %s exceeded deadline; stopping snoop", root)
             snoop.stop()
         result = snoop.stop()
         self._scan_seen_topics = result.topics
@@ -668,11 +761,13 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _start_scan(self, probe_topic: str, duration: float) -> Any:
         """Subscribe a snoop to ``probe_topic`` for ``duration`` seconds.
 
-        Returns the live ``SnoopListener``. The caller is responsible
-        for stopping it (the running step waits on
-        ``listener.is_finished`` and then calls ``stop()``). The
-        snoop is also wired to ``async_on_unload`` so a flow abort
-        tears the subscription down before the next attempt can leak.
+        Returns the live ``SnoopListener``, or ``None`` if the broker
+        refused the subscription -- the caller turns that into a
+        translated form error. The caller is responsible for stopping
+        the listener (the running step waits on ``listener.is_finished``
+        and then calls ``stop()``). The snoop is also wired to
+        ``async_on_unload`` so a flow abort tears the subscription down
+        before the next attempt can leak.
         """
         from .snoop import SnoopListener  # local import keeps the module HA-agnostic
 
@@ -685,7 +780,18 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # still drive the flow via a monkeypatched subscribe.
         from homeassistant.components import mqtt
 
-        await listener.start(self.hass, mqtt.async_subscribe)
+        try:
+            await listener.start(self.hass, mqtt.async_subscribe)
+        except Exception as scan_err:
+            # The subscribe is a broker round-trip and can fail for
+            # reasons the user can act on (an ACL that denies the probe
+            # root, a broker that is not up, a filter the broker
+            # rejects). Letting the exception escape the step shows an
+            # opaque stack trace in the UI and abandons the flow; a
+            # translated ``scan_failed`` on the settings form tells them
+            # what to fix and keeps their input.
+            _LOGGER.warning("Topic discovery scan could not subscribe to %s: %s", probe_topic, scan_err)
+            return None
 
         # Make sure the snoop is torn down if the user closes the flow
         # before the scan finishes.
@@ -703,6 +809,21 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         reload because the DeviceInfo carried on every entity is built
         from ``entry.data`` -- a reload is the simplest way to refresh
         the visible device metadata.
+
+        **The subscribe pre-flight.** The new pattern is checked against the
+        broker *before* it is committed. Previously the flow wrote
+        ``data_updates`` unconditionally, so a pattern the broker rejects (a
+        typo the syntax check cannot catch, an ACL that denies it, a broker
+        that is not actually up) was committed and then failed the reload --
+        leaving the user with a silently broken entry and a dialog that had
+        already reported success. A short-lived subscription is opened on the
+        candidate and torn down again on success; on failure the form comes
+        back with a translated error and ``entry.data`` is untouched.
+
+        The reload this triggers is also what re-points auto-discover at the
+        new pattern: ``async_unload_entry`` stops the snoop and
+        ``async_setup_entry`` starts a fresh one whose ``exclude_filter`` is
+        the new ``topic_pattern``.
         """
         entry = self._get_entry()
         if user_input is not None:
@@ -723,10 +844,35 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             topic = user_input[CONF_TOPIC_PATTERN]
-            device_name = _clean(user_input[CONF_DEVICE_NAME])
-            assert device_name is not None  # guarded by _validate above
+            # See ``async_step_manual_topic``: ``_validate`` has already
+            # rejected every input ``_clean`` returns ``None`` for, so this
+            # narrowing restates that check rather than adding a branch that
+            # can never be taken.
+            device_name = cast(str, _clean(user_input[CONF_DEVICE_NAME]))
             await self.async_set_unique_id(topic)
             self._abort_if_unique_id_configured()
+            try:
+                await self._can_subscribe(topic)
+            except ReconfigureSubscribeFailed as preflight_err:
+                # Log the translated exception so the developer-facing
+                # line and the user's ``cannot_connect`` toast describe
+                # the same failure. The form re-renders with the user's
+                # input intact; ``entry.data`` is untouched, so the entry
+                # keeps running on its previous pattern.
+                _LOGGER.debug("Reconfigure rejected: %s", preflight_err)
+                return self.async_show_form(
+                    step_id="reconfigure",
+                    data_schema=_config_schema(
+                        {
+                            CONF_TOPIC_PATTERN: topic,
+                            CONF_DEVICE_NAME: device_name or "",
+                            CONF_MODEL: user_input.get(CONF_MODEL, ""),
+                            "manufacturer": user_input.get("manufacturer", ""),
+                            CONF_SW_VERSION: user_input.get(CONF_SW_VERSION, ""),
+                        }
+                    ),
+                    errors={"base": "cannot_connect"},
+                )
             return self.async_update_reload_and_abort(
                 entry,
                 data_updates={
@@ -781,10 +927,55 @@ class TelegrafMqttConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors[CONF_SCAN_DURATION_SECONDS] = "invalid_duration"
         return errors
 
+    async def _can_subscribe(self, topic: str) -> None:
+        """Verify the broker accepts a subscription on ``topic``.
+
+        Opens a short-lived subscription and immediately tears it down.
+        Returns ``None`` when the broker accepted it; raises
+        ``ReconfigureSubscribeFailed`` (translated, carrying ``topic`` and
+        ``error``) when it did not or the wait timed out.
+
+        The unsubscribe is guaranteed on the success path, so a successful
+        pre-flight leaves the broker holding exactly the subscriptions the
+        running entry already has (main + snoop) -- this check must never
+        be the reason the broker ends up with an extra subscriber.
+
+        The wait is bounded: ``async_subscribe`` on a connected broker
+        resolves quickly, but on one that is mid-reconnect it can await
+        indefinitely, which would leave the dialog hung with no feedback.
+        The timeout turns that into the same form error as an outright
+        rejection.
+        """
+        from homeassistant.components import mqtt
+
+        try:
+            async with asyncio.timeout(RECONFIGURE_PREFLIGHT_TIMEOUT_SECONDS):
+                unsubscribe = await mqtt.async_subscribe(self.hass, topic, _preflight_message_sink)
+        except Exception as preflight_err:
+            raise ReconfigureSubscribeFailed(topic, str(preflight_err)) from preflight_err
+        try:
+            unsubscribe()
+        except Exception:  # fmt: skip
+            # A broker that rejects the UNSUBSCRIBE is a broker problem,
+            # not a reason to block the user's reconfigure; the
+            # subscription is dropped when the MQTT integration reconnects.
+            _LOGGER.debug("Reconfigure pre-flight unsubscribe failed for %s", topic)
+
     def _get_entry(self) -> ConfigEntry:
         """Return the entry being reconfigured."""
         entry: ConfigEntry = self.hass.config_entries.async_get_known_entry(self.context["entry_id"])
         return entry
+
+
+async def _preflight_message_sink(message: Any) -> None:
+    """Discard a message the reconfigure pre-flight subscription receives.
+
+    The pre-flight only asks "does the broker accept this filter?", not
+    "what is on it?". A real sink is still required: HA's MQTT
+    integration rejects a callable-shaped message handler, and a retained
+    message delivered during the pre-flight must not raise.
+    """
+    return None
 
 
 # Re-export so the ``__init__`` setup can validate the runtime strategy

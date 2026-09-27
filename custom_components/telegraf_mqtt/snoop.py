@@ -11,6 +11,14 @@ Two operating modes are supported:
   parse -> route -> render pipeline. New Telegraf hosts the user's
   configured ``topic_pattern`` missed are auto-added as devices and
   entities without the user having to add another config entry.
+
+``exclude_filter`` is what makes the dispatch mode additive rather than
+duplicative. The snoop subscribes to ``auto_discover_scope``, which is
+typically *broader* than the entry's ``topic_pattern``, so without an
+exclude filter every in-scope message would be processed twice: once by
+the main subscription and once here. With it, a message the main
+subscription already handles is still recorded in the seen-sets (so the
+"no traffic" diagnostic stays accurate) but is not re-dispatched.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
-from .const import DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
+from .topics import mqtt_filter_matches
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,23 +41,6 @@ _LOGGER = logging.getLogger(__name__)
 # and the dispatcher is responsible for reading ``.topic`` and
 # ``.payload`` off it.
 SnoopDispatcher = Callable[[str, Any], None]
-
-
-def derive_probe_topic(topic_pattern: str) -> str:
-    """Return a probe topic that never widens past ``topic_pattern``.
-
-    The post-setup snoop must never silently widen past the user's
-    configured subscription, so this function is a no-op on the
-    pattern itself: whatever the user configured is what the snoop
-    subscribes to. The single thing it does is fall back to the
-    documented default ``telegraf/#`` when the input is empty or
-    whitespace -- a corrupted entry shouldn't get a probe that
-    subscribes to literally everything on the broker.
-    """
-    cleaned = (topic_pattern or "").strip()
-    if not cleaned:
-        return DEFAULT_AUTO_DISCOVER_PROBE_TOPIC
-    return cleaned
 
 
 @dataclass
@@ -90,11 +81,20 @@ class SnoopListener:
         timeout_seconds: float,
         clock: Callable[[], float] | None = None,
         dispatcher: SnoopDispatcher | None = None,
+        exclude_filter: str | None = None,
     ) -> None:
         self._probe_topic = probe_topic
         self._timeout = max(0.0, float(timeout_seconds))
         self._clock = clock or monotonic
         self._dispatcher = dispatcher
+        # Immutable after construction on purpose. This is read once per
+        # inbound message on the broker callback path, and the integration
+        # applies a scope change by stopping and restarting the listener
+        # rather than mutating a value a message callback may be reading
+        # concurrently. A mutating setter here would be a shared-state
+        # hazard for zero benefit -- ``stop()`` + ``start()`` is cheap and
+        # keeps the broker subscription count at exactly one.
+        self._exclude_filter = exclude_filter
         self._seen_hosts: set[str] = set()
         self._seen_topics: set[str] = set()
         self._dispatched_count: int = 0
@@ -163,7 +163,7 @@ class SnoopListener:
             host = _extract_host(payload)
             if host:
                 self._seen_hosts.add(host)
-        if self._dispatcher is not None and isinstance(topic, str):
+        if self._dispatcher is not None and isinstance(topic, str) and not self._is_excluded(topic):
             try:
                 self._dispatcher(topic, payload)
             except Exception as dispatch_err:
@@ -175,6 +175,17 @@ class SnoopListener:
                 self._dispatcher_errors += 1
             else:
                 self._dispatched_count += 1
+
+    def _is_excluded(self, topic: str) -> bool:
+        """Return whether the main subscription already handles ``topic``.
+
+        True means "the entry's own ``topic_pattern`` would have received
+        this message anyway", so re-injecting it would parse, route and
+        dispatch everything twice for one publish. The seen-sets are
+        still updated in ``_on_message`` before this is consulted, so the
+        no-traffic diagnostic remains a truthful account of the broker.
+        """
+        return self._exclude_filter is not None and mqtt_filter_matches(topic, self._exclude_filter)
 
     def stop(self) -> SnoopResult:
         """Cancel the subscription and return a snapshot of what was seen."""

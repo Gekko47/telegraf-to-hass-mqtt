@@ -31,6 +31,7 @@ from custom_components.telegraf_mqtt.models import (
 )
 from custom_components.telegraf_mqtt.naming import apply_category_override
 from custom_components.telegraf_mqtt.parsers.static import static_cleanup_policy
+from custom_components.telegraf_mqtt.registry import DeviceManager
 
 
 def _descriptor(field: str = "x", value: Any = 1.0) -> MetricDescriptor:
@@ -483,6 +484,20 @@ def _manager(**kwargs: Any) -> Any:
     return manager
 
 
+def _timed_manager(clock: list) -> Any:
+    """A manager whose clock the test advances explicitly.
+
+    ``_manager`` injects the module clock, which the no-traffic tests must
+    be able to step forward to cross the grace window.
+    """
+    from custom_components.telegraf_mqtt.parser import TelegrafParser
+    from custom_components.telegraf_mqtt.registry import DeviceManager
+
+    manager = DeviceManager(clock=lambda: clock[0])
+    manager.set_parser(TelegrafParser())
+    return manager
+
+
 def test_device_manager_starts_with_no_seen_hosts() -> None:
     manager = _manager()
     assert manager.seen_hosts == frozenset()
@@ -704,45 +719,82 @@ class _ListenerEntry:
     runtime_data: Any = None
 
 
-def test_device_id_strategy_change_triggers_config_entry_reload() -> None:
-    """The ``_async_options_maybe_reload`` listener fires a config-entry
-    reload when the user picks a new strategy, because the existing
-    ``DeviceManager.devices`` dict is keyed by the old strategy's slugs
-    and a live apply would leave them orphaned while new traffic
-    creates a parallel set of registries.
+class _SpyManager(DeviceManager):
+    """A real manager that records how many times ``apply_options`` ran."""
 
-    Same-strategy updates must NOT trigger a reload.
-    """
-    from custom_components.telegraf_mqtt.registry import DeviceManager
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.apply_options_calls = 0
 
-    # Build a manager as the live update listener would, then assert the
-    # public read-only accessor matches the private slot.
-    manager = DeviceManager(device_id_strategy="host")
-    assert manager.device_id_strategy == "host"
+    def apply_options(self, **kwargs: Any) -> None:
+        self.apply_options_calls += 1
+        super().apply_options(**kwargs)
 
-    hass = _ListenerHass()
-    entry = _ListenerEntry(
-        options={},
+
+def _strategy_entry(manager: Any, options: dict, applied: str) -> _ListenerEntry:
+    return _ListenerEntry(
+        options=options,
         runtime_data=integration.TelegrafMqttRuntimeData(
             manager=manager,
             parser=None,
             parser_stats=None,
             manufacturer=None,
             model=None,
+            applied_device_id_strategy=applied,
         ),
     )
 
-    async def _run() -> None:
-        # No-op: same strategy the manager already has.
-        await integration._async_options_maybe_reload(hass, entry)
-        assert hass.config_entries.reload_calls == []
 
-        # Strategy changed: must trigger exactly one reload.
-        entry.options = {"device_id_strategy": "topic_only"}
-        await integration._async_options_maybe_reload(hass, entry)
-        assert hass.config_entries.reload_calls == [entry.entry_id]
+def test_device_id_strategy_change_triggers_config_entry_reload() -> None:
+    """A ``device_id_strategy`` change reloads the config entry exactly once.
 
-    asyncio.run(_run())
+    The reload is mandatory: the strategy feeds ``_derive_device_id``, so
+    every key in ``DeviceManager.devices`` is keyed by the old strategy's
+    slugs. A live apply cannot repair them, and rebuilding them changes every
+    entity's ``unique_id``. The single listener therefore short-circuits to
+    ``async_reload`` and MUST NOT also call ``apply_options`` -- a live apply
+    immediately before a reload is pure wasted work and re-introduces the
+    ordering hazard this refactor exists to remove.
+    """
+    manager = _SpyManager(device_id_strategy="host")
+    hass = _ListenerHass()
+    entry = _strategy_entry(manager, {"device_id_strategy": "topic_only"}, applied="host")
+
+    asyncio.run(integration._async_options_updated(hass, entry))
+
+    assert hass.config_entries.reload_calls == [entry.entry_id]
+    assert manager.apply_options_calls == 0
+
+
+def test_device_id_strategy_reload_survives_a_prior_live_apply() -> None:
+    """C1 regression: the reload must not be defeated by a mutated manager.
+
+    The original bug was a TWO-listener design. The live listener ran
+    first and called ``apply_options(device_id_strategy=...)``, which
+    overwrote ``DeviceManager._device_id_strategy``. The reload listener
+    then compared that already-mutated slot against the incoming option,
+    found them equal, and never reloaded.
+
+    This test reproduces exactly that state -- the manager's slot already
+    holds the NEW strategy, as a prior live apply would have left it -- and
+    asserts the reload still fires, because the decision is made against
+    ``runtime_data.applied_device_id_strategy``, which no live apply mutates.
+    """
+    manager = _SpyManager(device_id_strategy="host")
+    # Simulate the damage the old live-apply listener did.
+    manager._device_id_strategy = "topic_only"
+    assert manager.device_id_strategy == "topic_only"
+
+    hass = _ListenerHass()
+    # runtime_data still records the strategy the entry was SET UP with.
+    entry = _strategy_entry(manager, {"device_id_strategy": "topic_only"}, applied="host")
+
+    asyncio.run(integration._async_options_updated(hass, entry))
+
+    assert hass.config_entries.reload_calls == [entry.entry_id], (
+        "the strategy change must reload even when the manager's slot already holds the new value"
+    )
+    assert manager.apply_options_calls == 0
 
 
 def test_device_id_strategy_reload_listener_is_a_noop_when_runtime_missing() -> None:
@@ -751,10 +803,7 @@ def test_device_id_strategy_reload_listener_is_a_noop_when_runtime_missing() -> 
     hass = _ListenerHass()
     entry = _ListenerEntry(options={"device_id_strategy": "topic_only"}, runtime_data=None)
 
-    async def _run() -> None:
-        await integration._async_options_maybe_reload(hass, entry)
-
-    asyncio.run(_run())
+    asyncio.run(integration._async_options_updated(hass, entry))
     assert hass.config_entries.reload_calls == []
 
 
@@ -762,22 +811,10 @@ def test_device_id_strategy_reload_listener_is_a_noop_when_manager_missing() -> 
     """``runtime_data.manager`` is typed ``DeviceManager | None`` for
     the unload path; the listener must tolerate ``None`` and skip the
     reload without raising."""
-    entry = _ListenerEntry(
-        options={"device_id_strategy": "topic_only"},
-        runtime_data=integration.TelegrafMqttRuntimeData(
-            manager=None,
-            parser=None,
-            parser_stats=None,
-            manufacturer=None,
-            model=None,
-        ),
-    )
+    entry = _strategy_entry(None, {"device_id_strategy": "topic_only"}, applied="host")
     hass = _ListenerHass()
 
-    async def _run() -> None:
-        await integration._async_options_maybe_reload(hass, entry)
-
-    asyncio.run(_run())
+    asyncio.run(integration._async_options_updated(hass, entry))
     assert hass.config_entries.reload_calls == []
 
 
@@ -1220,11 +1257,22 @@ class _FakeSetupEntry:
         self.title = "Telegraf"
         self.runtime_data: Any = None
         self._unload_callbacks: list[Callable[[], None]] = []
+        self._update_listeners: list[Callable[..., Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
 
     def add_update_listener(self, _listener: Callable[..., Any]) -> Callable[[], None]:
+        """Record the listener instead of discarding it.
+
+        This used to return a no-op lambda and drop the callback, which is
+        exactly what a ``hasattr``-guarded registration would allow to
+        happen unnoticed. The setup path now registers the options
+        listener unconditionally, so a fake that quietly swallows it
+        would hide the very failure the guard removal is meant to
+        prevent.
+        """
+        self._update_listeners.append(_listener)
         return lambda: None
 
 
@@ -1293,12 +1341,17 @@ def _patch_setup(monkeypatch: pytest.MonkeyPatch, fake_mqtt: _SetupFakeMqtt) -> 
 def test_setup_wait_for_mqtt_client_failure_raises_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed ``async_wait_for_mqtt_client`` precheck raises
-    ``ConfigEntryNotReady`` (so HA retries) and never attempts the real
-    subscription."""
+    """A connectivity failure in the precheck raises ``ConfigEntryNotReady``.
+
+    HA retries, so the user sees a retryable toast rather than a dead
+    entry. The double raises ``OSError`` because that is what a broker
+    that cannot be reached actually raises -- an earlier revision used
+    ``RuntimeError`` here, which was the test agreeing with a too-broad
+    ``except Exception`` rather than describing the real failure mode.
+    """
     from homeassistant.exceptions import ConfigEntryNotReady
 
-    fake_mqtt = _SetupFakeMqtt(wait_error=RuntimeError("broker not connected"))
+    fake_mqtt = _SetupFakeMqtt(wait_error=OSError("broker not connected"))
     _patch_setup(monkeypatch, fake_mqtt)
     hass = _FakeSetupHass()
     entry = _FakeSetupEntry()
@@ -1315,6 +1368,64 @@ def test_setup_wait_for_mqtt_client_failure_raises_not_ready(
     assert getattr(captured["exc"], "translation_key", None) == "mqtt_broker_unreachable"
     # The precheck short-circuits -- no subscription was attempted.
     assert fake_mqtt.subscribe_calls == []
+
+
+def test_setup_precheck_does_not_swallow_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-connectivity failure in the precheck must NOT become ConfigEntryNotReady.
+
+    This is the guard on the catch being narrow. If the precheck raised
+    ``TypeError`` or ``AttributeError`` -- a bug, or an API whose shape
+    changed -- the previous ``except (TimeoutError, Exception)`` turned
+    it into a retryable "broker unreachable" forever: HA retried, the
+    entry never loaded, and the traceback never reached the log. The
+    failure had to look like a network problem to the user while
+    actually being a defect.
+
+    So the original exception has to propagate.
+    """
+    fake_mqtt = _SetupFakeMqtt(wait_error=TypeError("async_wait_for_mqtt_client() got an unexpected keyword"))
+    _patch_setup(monkeypatch, fake_mqtt)
+    hass = _FakeSetupHass()
+    entry = _FakeSetupEntry()
+
+    async def _run() -> None:
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        asyncio.run(_run())
+    # And it never fell through to attempting a subscription.
+    assert fake_mqtt.subscribe_calls == []
+
+
+def test_setup_always_registers_the_options_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup registers the options listener, unconditionally.
+
+    The registration used to sit behind
+    ``if hasattr(entry, "add_update_listener")``. A guard there is a
+    silent-failure generator: had it ever evaluated false, the entry
+    would load, every option would save, and none of them would take
+    effect -- the WS-A defect, back again with no error to explain it.
+
+    So the registration is asserted directly rather than inferred from
+    option changes working somewhere downstream.
+    """
+    fake_mqtt = _SetupFakeMqtt()
+    _patch_setup(monkeypatch, fake_mqtt)
+    hass = _FakeSetupHass()
+    entry = _FakeSetupEntry()
+
+    async def _run() -> None:
+        await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
+
+    asyncio.run(_run())
+
+    assert len(entry._update_listeners) == 1, "exactly one options listener, not zero and not two"
+    # And it is the one that owns the reload decision.
+    assert entry._update_listeners[0] is integration._async_options_updated
 
 
 def test_setup_snoop_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1545,29 +1656,37 @@ def test_retained_message_during_subscribe_reaches_platforms(
     assert manager.get_metric(metric_key) is not None
 
 
-def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
+def test_setup_entry_snoop_subscribes_to_the_explicit_scope_not_the_pattern(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The snoop's probe topic is the user's ``topic_pattern``, not
-    the global ``telegraf/#`` fallback.
+    """The snoop subscribes to ``auto_discover_scope``, and skips
+    everything ``topic_pattern`` already covers.
 
-    Production-wiring end-to-end: a user who configures
-    ``telegraf/rack1/#`` and opts in to ``auto_discover`` must have
-    the snoop subscribe on ``telegraf/rack1/#`` only. MQTT broker
-    filtering is what enforces the scope -- the snoop itself
-    doesn't filter messages -- so a wiring bug here would let the
-    snoop see rack2 traffic on a shared broker and auto-create
-    devices the user never opted into. This is the production
-    integration of the rack1/rack2 isolation invariant; the
-    unit-level version lives in
-    ``test_discover_topics.py::test_flow_start_scan_uses_user_supplied_probe_root``.
+    This replaces the old ``..._runs_snoop_on_rack1_only`` pin, which
+    asserted the snoop subscribed to the SAME filter as the main
+    subscription. That made the feature a no-op: ``derive_probe_topic``
+    was the identity function, so every message was parsed, routed and
+    dispatched twice while auto-discover could never surface a host the
+    main subscription did not already have.
+
+    The new contract has two halves and both are asserted here:
+
+    * the snoop's broker subscription is the *scope* (user-visible,
+      default ``telegraf/#``), which is what makes auto-discover able
+      to see hosts outside the entry's pattern at all; and
+    * the snoop's ``exclude_filter`` is the entry's ``topic_pattern``,
+      which is what keeps the wider subscription from re-processing
+      traffic the main subscription already owns.
+
+    A wiring bug in either half is a distinct user-visible defect: a
+    scope-less snoop finds nothing new, and a missing exclude filter
+    doubles every publish.
     """
     fake_mqtt = _SetupFakeMqtt()
     _patch_setup(monkeypatch, fake_mqtt)
 
     hass = _FakeSetupHass()
     entry = _FakeSetupEntry()
-    # The user is on rack1 only -- the snoop must respect that scope.
     entry.data = {CONF_TOPIC_PATTERN: "telegraf/rack1/#"}
     entry.options = {CONF_AUTO_DISCOVER: True}
 
@@ -1576,24 +1695,17 @@ def test_setup_entry_rack1_topic_runs_snoop_on_rack1_only(
 
     asyncio.run(_run())
 
-    # Real subscription is on the user's pattern. The snoop is the
-    # second subscription and is bound to the SAME pattern -- the
-    # broker is what filters, not the snoop, so the binding has to
-    # match. A refactor that hardcodes ``telegraf/#`` (or a wider
-    # default) in __init__.py is caught here.
     assert len(fake_mqtt.subscribe_calls) == 2
     assert fake_mqtt.subscribe_calls[0][0] == "telegraf/rack1/#"  # real
-    assert fake_mqtt.subscribe_calls[1][0] == "telegraf/rack1/#"  # snoop
+    assert fake_mqtt.subscribe_calls[1][0] == "telegraf/#"  # snoop: the scope
 
-    # The snoop is wired with a dispatcher -- the rack1 isolation
-    # is enforced at the broker level, not by the snoop code. If
-    # the broker ever delivered a rack2 message, it would land in
-    # the manager. We don't test that path (the broker doesn't
-    # deliver out-of-pattern messages in production); we test
-    # the binding.
-    snoop_cb = fake_mqtt.subscribe_calls[1][1]
-    snoop = snoop_cb.__self__
+    snoop = fake_mqtt.subscribe_calls[1][1].__self__
     assert snoop._dispatcher is not None
+    assert snoop._exclude_filter == "telegraf/rack1/#"
+    # The runtime records the pair so a later options save can tell
+    # "already correct" from "restart me".
+    assert entry.runtime_data.snoop_scope == "telegraf/#"
+    assert entry.runtime_data.snoop_exclude_filter == "telegraf/rack1/#"
 
 
 def test_setup_snoop_is_long_lived_and_stored_on_runtime_data(
@@ -1637,39 +1749,52 @@ def test_setup_snoop_is_long_lived_and_stored_on_runtime_data(
 def test_snoop_dispatcher_creates_devices_and_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the snoop's ``dispatcher`` is wired to ``manager.process_message``,
-    a captured message becomes a real device and metric in the registry.
-    This is the user-facing "auto-add entities" behaviour: a new Telegraf
-    host appearing under ``telegraf/#`` becomes a real device the user did
-    not have to add by hand."""
+    """A message OUTSIDE ``topic_pattern`` becomes a real device through
+    the snoop's dispatcher -- and one INSIDE it is skipped, not
+    double-processed.
+
+    This is the user-facing "auto-add entities" behaviour, and it is
+    only reachable now that the scope is independent of the pattern: a
+    host on ``telegraf/rack2/cpu`` is invisible to an entry subscribed
+    to ``telegraf/rack1/#``, so only the snoop can bring it in.
+
+    The skip half is asserted in the same test because it is the
+    property that makes the first half cheap: without it, every
+    in-scope publish would be parsed and dispatched twice, and this
+    test could not tell "the snoop added a host" from "the snoop
+    re-added a host the main path already had".
+    """
     fake_mqtt = _SetupFakeMqtt()
     _patch_setup(monkeypatch, fake_mqtt)
 
     hass = _FakeSetupHass()
     hass.loop = object()
     entry = _FakeSetupEntry()
+    # Narrow pattern, broad scope: the configuration auto-discover exists for.
+    entry.data = {CONF_TOPIC_PATTERN: "telegraf/rack1/#"}
+    entry.options = {CONF_AUTO_DISCOVER: True}
 
     async def _run() -> None:
         await integration.async_setup_entry(hass, entry)  # type: ignore[arg-type]
 
     asyncio.run(_run())
-    # The snoop is the second subscription.
     snoop_cb = fake_mqtt.subscribe_calls[1][1]
     snoop = snoop_cb.__self__
-    # Sanity: the snoop was constructed with a dispatcher.
     assert snoop._dispatcher is not None
-    # A message on a topic the *user's* primary pattern (``telegraf/#``)
-    # would also match, but a unique host lands the device in the
-    # registry through the dispatcher.
-    asyncio.run(
-        snoop_cb(
-            _FakeMqttMessage(
-                topic="telegraf/snoop-host/cpu",
-                payload=_payload("cpu", "snoop-host"),
-            )
-        )
-    )
-    # Dispatched count incremented exactly once.
+
+    # In-pattern message: recorded in the snoop's own seen-set but NOT
+    # dispatched -- the main subscription owns that traffic. (The
+    # manager's ``seen_topics``, which ``check_no_traffic`` reads, stays
+    # accurate because the main subscription feeds the same message to
+    # ``record_seen_host`` in production.)
+    asyncio.run(snoop_cb(_FakeMqttMessage(topic="telegraf/rack1/cpu", payload=_payload("cpu", "in-scope-host"))))
+    assert snoop.dispatched_count == 0
+    assert "telegraf/rack1/cpu" in snoop._seen_topics
+    assert "in-scope-host" in snoop._seen_hosts
+    assert len(entry.runtime_data.manager.devices) == 0
+
+    # Out-of-pattern message: dispatched, and the host becomes a device.
+    asyncio.run(snoop_cb(_FakeMqttMessage(topic="telegraf/rack2/cpu", payload=_payload("cpu", "snoop-host"))))
     assert snoop.dispatched_count == 1
     # The manager now has a device + metric for the new host. The
     # device id is the ``host`` tag slugified with a collision
@@ -1973,15 +2098,20 @@ def _patch_ir(monkeypatch, fake_ir):
     monkeypatch.setattr("custom_components.telegraf_mqtt.ir", fake_ir)
 
 
-def test_check_no_traffic_raises_when_no_messages(monkeypatch) -> None:
-    """If the manager has not received any messages by the time the
-    Repairs check runs, the issue is raised with a preview of the
-    configured topic pattern."""
+def test_check_no_traffic_raises_after_sustained_silence(monkeypatch) -> None:
+    """A topic that has never produced a message, past the grace window.
+
+    Silence is measured from entry STARTUP for the "never any" case, so a
+    freshly-added entry is not warned before Telegraf's first publish
+    interval has had a chance to elapse.
+    """
+    from custom_components.telegraf_mqtt.const import NO_TRAFFIC_GRACE_SECONDS
     from custom_components.telegraf_mqtt.repairs import check_no_traffic
 
     fake_ir = _FakeIr()
     _patch_ir(monkeypatch, fake_ir)
-    manager = _manager()
+    clock = [1_000.0]
+    manager = _timed_manager(clock)
     entry = _FakeEntry(
         entry_id="A",
         data={CONF_TOPIC_PATTERN: "telegraf/host-a/#"},
@@ -1989,8 +2119,14 @@ def test_check_no_traffic_raises_when_no_messages(monkeypatch) -> None:
     )
     hass = _FakeHassForRepairs()
 
+    # Inside the grace window: a brand-new entry is not warned.
+    clock[0] = 1_000.0 + NO_TRAFFIC_GRACE_SECONDS - 1
     check_no_traffic(hass, entry)
-    # Exactly one create call for no_traffic_on_topic.
+    assert fake_ir.created == []
+
+    # Past it: raise, with a preview of the configured topic pattern.
+    clock[0] = 1_000.0 + NO_TRAFFIC_GRACE_SECONDS + 1
+    check_no_traffic(hass, entry)
     assert len(fake_ir.created) == 1
     call = fake_ir.created[0]
     assert call.issue_id == "no_traffic_on_topic_A"
@@ -2000,13 +2136,21 @@ def test_check_no_traffic_raises_when_no_messages(monkeypatch) -> None:
     assert placeholders["seen_topics"] == "(none)"
 
 
-def test_check_no_traffic_auto_resolves_when_messages_arrive(monkeypatch) -> None:
-    """Once messages have arrived, the next call deletes the issue."""
+def test_check_no_traffic_does_not_flap_for_a_slow_publisher(monkeypatch) -> None:
+    """M2 regression: a host publishing slower than the grace window must
+    never raise the issue at all.
+
+    The old condition was "no message has EVER arrived", checked every
+    expiry tick. A host publishing every 10 minutes therefore saw the
+    issue raised, auto-resolved on its next message, and raised again --
+    forever. A Repairs panel that flickers trains users to ignore it.
+    """
     from custom_components.telegraf_mqtt.repairs import check_no_traffic
 
     fake_ir = _FakeIr()
     _patch_ir(monkeypatch, fake_ir)
-    manager = _manager()
+    clock = [1_000.0]
+    manager = _timed_manager(clock)
     entry = _FakeEntry(
         entry_id="A",
         data={CONF_TOPIC_PATTERN: "telegraf/#"},
@@ -2014,6 +2158,63 @@ def test_check_no_traffic_auto_resolves_when_messages_arrive(monkeypatch) -> Non
     )
     hass = _FakeHassForRepairs()
 
+    # Ten minutes of a host publishing every 600s, ticked every 60s.
+    for _ in range(10):
+        manager.record_seen_host("host-a", "telegraf/host-a/cpu")
+        clock[0] += 60.0
+        check_no_traffic(hass, entry)
+
+    assert fake_ir.created == [], "a host inside the grace window must never be flagged"
+    # The check does call ``async_delete_issue`` on every tick (it is
+    # idempotent, and deleting a non-existent issue is a no-op). What must
+    # not happen is a ``create`` -- that is the flap.
+
+
+def test_check_no_traffic_raises_when_a_busy_host_then_goes_quiet(monkeypatch) -> None:
+    """Traffic that then stops for longer than the grace window does raise."""
+    from custom_components.telegraf_mqtt.const import NO_TRAFFIC_GRACE_SECONDS
+    from custom_components.telegraf_mqtt.repairs import check_no_traffic
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    clock = [1_000.0]
+    manager = _timed_manager(clock)
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    manager.record_seen_host("host-a", "telegraf/host-a/cpu")
+    clock[0] += NO_TRAFFIC_GRACE_SECONDS - 1
+    check_no_traffic(hass, entry)
+    assert fake_ir.created == []
+
+    clock[0] += 10
+    check_no_traffic(hass, entry)
+    assert len(fake_ir.created) == 1
+    assert fake_ir.created[0].issue_id == "no_traffic_on_topic_A"
+
+
+def test_check_no_traffic_auto_resolves_when_messages_arrive(monkeypatch) -> None:
+    """A message arriving clears a previously-raised issue."""
+    from custom_components.telegraf_mqtt.const import NO_TRAFFIC_GRACE_SECONDS
+    from custom_components.telegraf_mqtt.repairs import check_no_traffic
+
+    fake_ir = _FakeIr()
+    _patch_ir(monkeypatch, fake_ir)
+    clock = [1_000.0]
+    manager = _timed_manager(clock)
+    entry = _FakeEntry(
+        entry_id="A",
+        data={CONF_TOPIC_PATTERN: "telegraf/#"},
+        runtime_data=_runtime_data_for(manager),
+    )
+    hass = _FakeHassForRepairs()
+
+    # Raise first: silence past the grace window.
+    clock[0] = 1_000.0 + NO_TRAFFIC_GRACE_SECONDS + 1
     check_no_traffic(hass, entry)
     assert len(fake_ir.created) == 1
     # A message arrives.

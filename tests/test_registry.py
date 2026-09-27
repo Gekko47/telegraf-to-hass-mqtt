@@ -208,7 +208,9 @@ class _FakeParser:
     def __init__(self, descriptors: list[MetricDescriptor]) -> None:
         self._descriptors = descriptors
 
-    def parse(self, payload: str | bytes) -> list[MetricDescriptor]:
+    def parse(self, payload: str | bytes, *, topic: str = "<unknown>") -> list[MetricDescriptor]:
+        # ``topic`` is accepted because the manager now forwards it so
+        # ``ParserStats.last_message`` can name the offending topic.
         return list(self._descriptors)
 
 
@@ -325,7 +327,7 @@ def test_device_manager_cleanup_skips_offline_device_and_removes_only_active_sta
     # Both devices saw their stale metric marked unavailable; only the
     # active device's candidate is removed by cleanup.
     assert {k for k, _ in candidate_writes} == {"server01:cpu_usage_idle", "server02:mem_used_percent"}
-    assert removed == ["server01:cpu_usage_idle"]
+    assert removed == [("server01", "cpu_usage_idle")]
     assert writes == [("server01:cpu_usage_idle", False)]
     assert manager.get_metric("server01:cpu_usage_idle") is None
     assert manager.get_metric("server02:mem_used_percent") is not None
@@ -528,7 +530,7 @@ def test_device_heartbeat_separates_offline_device_from_stale_metric() -> None:
     manager.check_expiry()
     clock[0] = 200.0
     online.last_any_metric = 200.0
-    assert manager.cleanup() == ["server01:usage_idle"]
+    assert manager.cleanup() == [("server01", "usage_idle")]
     assert manager.get_metric("server01:usage_idle") is None
     # ...the OFFLINE device keeps its entity however long the delay grows.
     clock[0] = 10_000.0

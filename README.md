@@ -60,6 +60,28 @@ for how to add a repository outside the default HACS list.
   adds no MQTT client of its own).
 - No other Python dependencies are required.
 
+### Security: topic scope is the access boundary
+
+**This integration has no per-host allow-list. What a Telegraf MQTT entry can see is
+exactly the MQTT topic filter it subscribes to.** `topic_pattern` — and, if you enable
+it, `auto_discover_scope` — *are* the access-control boundary. A filter broader than
+your own tree means this integration will parse, display, and record metrics from
+systems you did not intend to monitor, on a shared broker.
+
+Practical guidance:
+
+- **Own broker:** `telegraf/#` is fine.
+- **Shared broker (e.g. a public or office one):** scope narrowly —
+  `telegraf/<your-prefix>/#`. Both the main pattern and the auto-discovery scope
+  open real, long-lived subscriptions.
+- **Two entries must not overlap.** If two entries subscribe to overlapping patterns,
+  the same message is parsed twice and the same host can end up represented by two
+  devices with conflicting IDs. The **"Overlapping topic patterns"** Repairs issue is
+  the only guard against this; it is a warning, not a block, so treat it as a real
+  signal to reconfigure rather than something to dismiss.
+- Payload contents are not sanitised beyond Telegraf JSON parsing. A host that can
+  publish to your topic tree can influence which entities and devices are created.
+
 ### Upgrade
 
 Because the integration is installed from a repository (HACS) or manually, upgrade by
@@ -92,16 +114,71 @@ The integration also supports an options flow (Settings -> Devices & Services ->
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `exclude_patterns` | list of strings | `[]` | Glob patterns matched against each metric's `unique_key`; matching metrics are **not** created. Example: `["mem_*", "swap_*"]`. |
-| `field_overrides` | dict of `field → {key: value}` | `{}` | Override metadata per field, layered on top of the built-in heuristics. Supported keys: `native_unit`, `device_class`, `state_class`, `entity_category`. |
-| `expire_after` | int seconds | `120` | Time after the last message before a metric is marked unavailable. |
-| `enable_cleanup` | bool | `True` | When on, stale metrics (unavailable for `cleanup_delay`) are removed. |
-| `cleanup_delay` | int seconds | `2592000` (30 days) | How long a metric must be unavailable before cleanup considers it. |
-| `delete_delay` | int seconds | `5184000` (60 days) | How long an empty device must stay empty before it is removed. |
+| `field_overrides` | dict of `field → {key: value}` | `{}` | Override metadata per field, layered on top of the built-in heuristics. Supported keys: `native_unit`, `device_class`, `state_class`, `entity_category`, `platform`. `platform: "none"` drops the field entirely (removing any existing entity for it); `platform: "binary_sensor"` coerces a non-boolean value to a boolean. |
+| `category_overrides` | dict of `unique_key → "config" \| "diagnostic" \| null` | `{}` | Override the inferred entity category per metric. `null` clears it. |
+| `device_id_strategy` | `"host"` \| `"host_topic"` \| `"topic_only"` | `"host"` | How a device's registry ID is derived. `host` is the most stable across topic re-arranges; `topic_only` uses the topic tree alone. **Changing this changes entity IDs** and recreates the affected entities once. |
+| `expire_after` | int seconds | `120` | Time after the last message before a metric is marked unavailable. Availability is always tracked, regardless of `enable_cleanup`. |
+| `enable_cleanup` | bool | `True` | Master switch for **deletion**. When off, nothing is removed — neither individual metrics nor whole devices — and entities only ever go unavailable. |
+| `cleanup_delay` | int seconds | `2592000` (30 days) | How long a metric must be unavailable before cleanup *considers* removing it. This is the per-metric delay. |
+| `delete_delay` | int seconds | `5184000` (60 days) | How long a **whole device** must be silent before it is removed, along with every entity it still holds. See [Entity lifecycle](#entity-lifecycle) for how this differs from `cleanup_delay`. |
 | `min_active_metrics` | int | `1` | Cleanup is a no-op for a device with fewer than this many active metrics. |
+| `auto_discover` | bool | `False` | Opt in to a second, long-lived subscription that creates devices for hosts your `topic_pattern` does not cover. See [Auto-discovery](#auto-discovery). |
+| `auto_discover_scope` | MQTT topic filter | `telegraf/#` | The filter the `auto_discover` listener subscribes to. Independent of `topic_pattern` and may be narrower or wider. Anything already covered by `topic_pattern` is recorded but **not** re-processed. |
 
 The options flow coerces invalid persisted values to the documented default and raises
 a Repairs issue so the user can correct them from the UI without the entry failing to
-set up.
+set up. Every field in the form is pre-filled with the value currently in effect, so
+opening the options flow never blanks a setting you did not intend to change.
+
+### Auto-discovery
+
+By default an entry subscribes to exactly one filter: its `topic_pattern`. If a host
+publishes on a topic outside that filter, it is simply not seen.
+
+Turning on `auto_discover` opens a **second** subscription on
+`auto_discover_scope`, which stays open for as long as the entry is loaded. Hosts seen
+only on that scope are added as new devices, exactly as if they had arrived on the main
+subscription. Anything the main subscription already covers is skipped, so auto-discovery
+is purely additive: it can add devices your pattern missed, and never re-processes a
+message the main path already handled.
+
+Two consequences worth knowing:
+
+- The scope is a **live MQTT subscription**. On a shared broker, keep it inside your own
+  topic tree (e.g. `telegraf/mine/#`) rather than the default `telegraf/#`.
+- If the scope adds nothing beyond what `topic_pattern` already receives, a Repairs
+  issue warns you that the subscription is doing no work. Either widen the pattern or
+  narrow the scope.
+
+Changing `auto_discover` or its scope restarts the listener; the main subscription is
+untouched and no entity is lost.
+
+### Entity lifecycle
+
+A metric moves through three states, and the delays are set by three different options:
+
+| Phase | Trigger | Effect | Controlled by |
+|---|---|---|---|
+| **Unavailable** | No message for `expire_after` | Entity goes unavailable, stays in the registry | always on |
+| **Cleanup candidate** | Still unavailable after a further `cleanup_delay` | Nothing visible yet; the metric is queued for removal | `cleanup_delay` |
+| **Removed** | Candidate for `cleanup_delay` | The entity is **deleted** from the registry | `enable_cleanup` + `cleanup_delay` |
+| **Device removed** | Host silent for `delete_delay` | The whole device and every entity on it are deleted | `enable_cleanup` + `delete_delay` |
+
+The important distinction: **`cleanup_delay` is per-metric** (this one field went quiet)
+and **`delete_delay` is per-device** (the host itself stopped publishing). A device can
+lose individual metrics via `cleanup_delay` long before the whole device is retired via
+`delete_delay`.
+
+Metrics whose fields are static system metadata — a hostname, a software version, a
+boot time — carry a `NEVER` cleanup policy and are exempt: they never become cleanup
+candidates, so a permanently-silent host still has its identity entities until
+`delete_delay` retires the device itself.
+
+**Removal is reversible.** If a host comes back and starts publishing on its original
+topics, its entities are recreated automatically. Long recorder statistics survive a
+recreation, because the entity IDs are stable. If you *want* entities to persist
+indefinitely as unavailable rather than being removed, set `enable_cleanup` to `False` —
+availability is still tracked, only deletion stops.
 
 ### Reconfigure
 
@@ -111,6 +188,17 @@ without removing and re-adding the entry. The integration reloads the config ent
 swap the MQTT subscription; the previous subscription is unsubscribed cleanly during
 unload. Re-configuring to a topic pattern already used by another entry aborts with a
 duplicate-topic error.
+
+Before saving, the flow **pre-checks the broker**: it opens a short-lived subscription on
+the new pattern and immediately tears it down. If the broker refuses it, or does not
+respond within 10 seconds, the form is re-rendered with a translated error naming the
+topic and the broker's reason. The config entry is only updated once the broker has
+actually accepted the subscription, so a rejected reconfigure leaves the previous
+working pattern in place.
+
+Reconfiguration **and** options changes both apply live. A topic change reloads the
+entry (new subscription, entities rebuilt); other option changes are applied in place
+without a reload where possible.
 
 ## Reference
 
@@ -304,6 +392,8 @@ Result:
 | Options dialog rejects my number | Persisted value is non-numeric / negative | Open Repairs -> "Invalid Telegraf MQTT option(s)" -> correct the value. |
 | Reconfigure doesn't take effect | The new topic pattern matches another entry's pattern | Open Repairs -> "Overlapping topic patterns" -> pick a distinct pattern. |
 | Diagnostics show only the broker config | Integration hasn't seen any messages yet | Wait for at least one Telegraf message, then re-download. |
+| An entity disappeared | It was removed, not just marked unavailable | Check `pending_cleanup` in the diagnostics download for the reason and countdown; see [Entity lifecycle](#entity-lifecycle). |
+| Auto-discovery never finds anything | Its scope adds nothing beyond `topic_pattern` | The "auto_discover scope adds no value" Repairs issue fires in this case; widen the pattern or narrow the scope. |
 | Entities are off by default | They are diagnostic (disk, system, lifecycle) | Open Settings -> Devices & Services -> Entities, enable the ones you want. |
 
 ### Entity behavior

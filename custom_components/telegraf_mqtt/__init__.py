@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ try:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.const import Platform
     from homeassistant.core import HomeAssistant, callback
-    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
     from homeassistant.helpers import entity_registry as er
     from homeassistant.helpers import issue_registry as ir
     from homeassistant.helpers.dispatcher import (
@@ -42,7 +43,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in unit-test im
     ir = None  # type: ignore[assignment]
 
 from .const import (
+    BROKER_WAIT_TIMEOUT_SECONDS,
     CONF_AUTO_DISCOVER,
+    CONF_AUTO_DISCOVER_SCOPE,
     CONF_CATEGORY_OVERRIDES,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
@@ -54,6 +57,7 @@ from .const import (
     CONF_MIN_ACTIVE_METRICS,
     CONF_TOPIC_PATTERN,
     DEFAULT_AUTO_DISCOVER,
+    DEFAULT_AUTO_DISCOVER_SCOPE,
     DEFAULT_CLEANUP_DELAY,
     DEFAULT_DELETE_DELAY,
     DEFAULT_DEVICE_ID_STRATEGY,
@@ -72,6 +76,7 @@ from .const import (
 from .parser import ParserStats, TelegrafParser
 from .registry import DeviceManager
 from .repairs import (
+    check_auto_discover_scope,
     check_device_cap,
     check_device_id_collision,
     check_device_id_conflict,
@@ -80,7 +85,7 @@ from .repairs import (
     check_no_traffic,
     check_overlapping_topics,
 )
-from .snoop import SnoopListener, derive_probe_topic
+from .snoop import SnoopListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +105,21 @@ class TelegrafMqttRuntimeData:
     unsubscribe: Callable[[], None] | None = None
     unsubscribe_snoop: Callable[[], None] | None = None
     cancel_expiry: Callable[[], None] | None = None
+    # The auto-discover scope the running snoop is subscribed to, and the
+    # main-subscription filter it is skipping. Both are captured so
+    # ``_apply_auto_discover`` can tell "already correct, leave it alone"
+    # from "the user changed the scope, restart the listener" without a
+    # second subscription being opened on the way. ``None`` means no
+    # snoop is running.
+    snoop_scope: str | None = None
+    snoop_exclude_filter: str | None = None
+    # The strategy this entry was *set up* with, captured before any live
+    # options apply can overwrite ``DeviceManager._device_id_strategy``.
+    # The options-update listener compares against this rather than against
+    # the manager, because by the time it runs the manager already holds the
+    # NEW value and the comparison would always be equal -- which is exactly
+    # why the previous two-listener arrangement never reached its reload.
+    applied_device_id_strategy: str = DEFAULT_DEVICE_ID_STRATEGY
 
 
 def _broker_unreachable_not_ready(topic: str, error: str) -> ConfigEntryNotReady:
@@ -109,9 +129,20 @@ def _broker_unreachable_not_ready(topic: str, error: str) -> ConfigEntryNotReady
     ``async_setup_entry`` so the toast text, translation domain/key, and
     topic/error placeholders stay in sync. The caller is responsible for
     raising the result with ``raise ... from <err>`` to preserve exception
-    chaining. (``exceptions.MqttBrokerUnreachable`` is the typed exception
-    used by tests and the reconfigure flow; setup must convert to
-    ``ConfigEntryNotReady`` so HA retries instead of failing hard.)
+    chaining.
+
+    Setup MUST surface a retryable failure: an unreachable broker is a
+    transient condition, and HA's retry loop is the correct response. An
+    ordinary ``HomeAssistantError`` would be treated as fatal and leave
+    the user with a dead entry and a restart as the only way out.
+
+    ``exceptions.MqttBrokerUnreachable`` was the typed exception for this
+    condition and has now been DELETED. It could not be raised here
+    without breaking the retry semantics above, no other surface needed a
+    fatal broker error, and the ``mqtt_broker_unreachable`` translation
+    key is fully reachable through this ``ConfigEntryNotReady`` -- so it
+    was a class with no production callsite carrying a translation key
+    that did not need it. See AC14 in the hardening plan.
     """
     ready_exc = ConfigEntryNotReady(f"Could not subscribe to {topic}: {error}")
     ready_exc.translation_domain = DOMAIN
@@ -149,6 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         manufacturer=entry.data.get("manufacturer"),
         model=entry.data.get("model"),
         sw_version=entry.data.get("sw_version"),
+        applied_device_id_strategy=options.device_id_strategy,
     )
 
     # Connect platform dispatcher listeners BEFORE any MQTT subscription
@@ -181,31 +213,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if mqtt is not None:
-        topic_pattern = entry.data[CONF_TOPIC_PATTERN]
+        # M8: a corrupt entry (hand-edited .storage, a partial write) used
+        # to raise a bare KeyError here. That is not a retryable error, so
+        # HA retried forever with a raw traceback and no user-facing
+        # message. Fail with a translated error instead.
+        topic_pattern = entry.data.get(CONF_TOPIC_PATTERN)
+        if not isinstance(topic_pattern, str) or not topic_pattern:
+            _LOGGER.error(
+                "Config entry %s has no usable %s in its data; it cannot be set up",
+                entry.entry_id,
+                CONF_TOPIC_PATTERN,
+            )
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="missing_topic_pattern",
+                translation_placeholders={"entry_title": entry.title},
+            )
 
         manager.set_callbacks(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key),
             on_discovered=lambda metric_key: _dispatch_new_metric(hass, entry, metric_key),
             on_new_device=_make_new_device_callback(hass, entry),
+            on_remove=lambda device_id, unique_key: _dispatch_remove_metric(hass, entry, device_id, unique_key),
         )
 
         async def message_received(message: Any) -> None:
             manager.process_message(message.topic, message.payload)
 
-        # Phase 10: ``mqtt.async_wait_for_mqtt_client`` is the canonical
-        # precheck on HA 2026.6 -- the broker either has an active
-        # connection or we raise ``ConfigEntryNotReady`` for HA to retry.
-        # We no longer do the SUBSCRIBE-ACK probe; the wait + the real
-        # ``async_subscribe`` are sufficient to surface broker reachability.
-        # The precheck is optional -- older HA test doubles (and earlier
-        # versions of this integration's own test fakes) don't expose it,
-        # so we fall back to a direct subscribe and rely on the standard
-        # MQTT error path.
-        if hasattr(mqtt, "async_wait_for_mqtt_client"):
-            try:
+        # WS-E1: bound the precheck. ``async_wait_for_mqtt_client`` resolves
+        # only on a client-connected event, so with an unreachable broker an
+        # unbounded await leaves the entry stuck in "setting up" forever --
+        # no error, no retry, no message. The timeout turns that silence into
+        # a translated "broker unreachable" and a normal HA retry cycle.
+        #
+        # The ``hasattr`` guard is gone on purpose: at the declared
+        # 2026.6.0 floor this API is guaranteed, and the guard only ever
+        # existed to accommodate older test doubles -- which meant the
+        # fakes, not the integration, defined the contract.
+        #
+        # The catch is deliberately NARROW. ``async_wait_for_mqtt_client``
+        # fails in exactly two ways that mean "the broker is not usable
+        # yet": the bounded wait elapses, or the MQTT client raises
+        # ``OSError`` while connecting. Anything else -- a ``TypeError``
+        # from a bad call, an ``AttributeError`` from an API that changed
+        # shape -- is a BUG, and must not be laundered into
+        # ``ConfigEntryNotReady``. An over-broad catch here is worse than
+        # no catch at all: HA retries forever, the traceback is never
+        # logged, and the entry silently never loads with no signal that
+        # anything other than connectivity is wrong.
+        try:
+            async with asyncio.timeout(BROKER_WAIT_TIMEOUT_SECONDS):
                 await mqtt.async_wait_for_mqtt_client(hass)
-            except Exception as wait_err:
-                raise _broker_unreachable_not_ready(topic_pattern, str(wait_err)) from wait_err
+        except (TimeoutError, OSError) as wait_err:
+            raise _broker_unreachable_not_ready(topic_pattern, str(wait_err)) from wait_err
 
         try:
             entry.runtime_data.unsubscribe = await mqtt.async_subscribe(hass, topic_pattern, message_received)
@@ -213,22 +273,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise _broker_unreachable_not_ready(topic_pattern, str(real_err)) from real_err
         _LOGGER.info("Subscribed to Telegraf MQTT topic pattern %s", topic_pattern)
 
-        # Phase 10: post-setup snoop listener. Runs only when the user
-        # has the auto-discover option enabled (default off -- the user
-        # must opt in via the options flow). The listener installs a
-        # second subscription on a probe topic and hands every captured
-        # message back to ``manager.process_message`` so newly-seen
-        # Telegraf hosts become real devices and entities without the
-        # user having to add another config entry. The unsubscribe
+        # Post-setup snoop listener. Runs only when the user has the
+        # auto-discover option enabled (default off -- the user must opt
+        # in via the options flow). The listener installs a second
+        # subscription on ``auto_discover_scope`` and hands every message
+        # the main subscription did NOT already cover back to
+        # ``manager.process_message``, so Telegraf hosts publishing
+        # outside ``topic_pattern`` become real devices and entities
+        # without the user adding another config entry. The unsubscribe
         # handle is stored on the runtime data and torn down in
-        # ``async_unload_entry``. The Repairs framework consults
-        # ``manager.seen_hosts`` + ``seen_topics`` to raise a hint when
-        # the configured topic pattern matches no traffic.
+        # ``async_unload_entry``.
         #
-        # The probe is derived from the user's ``topic_pattern`` so the
-        # snoop never silently widens past the user's scope. The start /
-        # stop wiring lives in ``_apply_auto_discover`` so the live
-        # options-update listener can toggle the listener in place too.
+        # Both filters are the user's own: the scope is the literal option
+        # value (nothing is widened implicitly), and the skip filter is
+        # ``topic_pattern``, which makes the feature purely additive. The
+        # start / stop / restart wiring lives in ``_apply_auto_discover``
+        # so the live options-update listener can drive it in place too.
         await _apply_auto_discover(hass, entry, options)
 
     if async_track_time_interval is not None:
@@ -237,13 +297,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if async_dispatcher_connect is not None:
         entry.async_on_unload(_listener_remove_metric(hass, entry))
 
-    if hasattr(entry, "async_on_unload") and hasattr(entry, "add_update_listener"):
-        entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-        # ``device_id_strategy`` is the one option that cannot be applied
-        # live -- see ``_async_options_maybe_reload`` for the reason. Both
-        # listeners fire on every options change; the live path runs
-        # first, then the reload path triggers when the strategy differs.
-        entry.async_on_unload(entry.add_update_listener(_async_options_maybe_reload))
+    # ONE listener, not two. ``_async_options_updated`` owns both the
+    # live-apply path and the strategy-reload decision; it must make the
+    # reload decision BEFORE calling ``apply_options`` (which overwrites
+    # the manager's strategy slot). See that function for the details.
+    #
+    # No ``hasattr`` guard. ``ConfigEntry`` has provided both methods for
+    # many major versions, and a guard here is worse than useless: if it
+    # ever evaluated false the options listener would simply not be
+    # registered, and every option change would be silently accepted and
+    # then ignored -- the exact WS-A failure, recurring in a new form,
+    # with no error anywhere. Silent feature death is strictly worse than
+    # an AttributeError on an object that is not a ConfigEntry.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     # Phase 7: Repairs for recoverable config problems. The overlap
     # check is idempotent -- if this entry's pattern is fine and no
@@ -271,6 +337,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate a config entry forward to the current schema version.
+
+    **v1 -> v2.** Backfill every option key the entry does not already have
+    with its documented default, without touching any key that IS present.
+    A sparse ``entry.options`` (``{}`` is the common case for an entry whose
+    options dialog was never opened) becomes explicit, so what the
+    integration is actually running is readable from ``.storage``.
+
+    This is deliberately *additive*. ``_normalize_options`` already falls
+    back to the same defaults for missing keys, so a v1 entry is
+    semantically identical before and after -- persisting them just makes
+    the state visible. A full revert of this migration is therefore safe:
+    leftover default keys are ignored.
+
+    ``CONF_TOPIC_PATTERN`` is never synthesised. An entry missing it is
+    genuinely broken, and guessing a subscription would point the
+    integration at the user's whole broker; the setup guard raises a
+    translated error instead.
+    """
+    if entry.version > 2:
+        # Forward-compat: a downgrade. Refuse rather than corrupt.
+        _LOGGER.error(
+            "Config entry %s is at schema version %s, newer than this release supports (2)",
+            entry.entry_id,
+            entry.version,
+        )
+        return False
+
+    if entry.version < 2:
+        stored = dict(entry.options or {})
+        defaults: dict[str, Any] = {
+            CONF_AUTO_DISCOVER: DEFAULT_AUTO_DISCOVER,
+            CONF_EXPIRE_AFTER: DEFAULT_EXPIRE_AFTER,
+            CONF_ENABLE_CLEANUP: DEFAULT_ENABLE_CLEANUP,
+            CONF_CLEANUP_DELAY: DEFAULT_CLEANUP_DELAY,
+            CONF_DELETE_DELAY: DEFAULT_DELETE_DELAY,
+            CONF_MIN_ACTIVE_METRICS: DEFAULT_MIN_ACTIVE_METRICS,
+            CONF_CATEGORY_OVERRIDES: {},
+            CONF_EXCLUDE_PATTERNS: [],
+            CONF_FIELD_OVERRIDES: {},
+            CONF_DEVICE_ID_STRATEGY: DEFAULT_DEVICE_ID_STRATEGY,
+            CONF_AUTO_DISCOVER_SCOPE: DEFAULT_AUTO_DISCOVER_SCOPE,
+        }
+        added = sorted(key for key in defaults if key not in stored)
+        # ``setdefault`` semantics: a key the user already set is preserved
+        # exactly, including a deliberately unusual value.
+        for key, value in defaults.items():
+            stored.setdefault(key, value)
+        _LOGGER.info(
+            "Migrated config entry %s from v1 to v2; backfilled %d option key(s): %s",
+            entry.entry_id,
+            len(added),
+            ", ".join(added) or "(none)",
+        )
+        hass.config_entries.async_update_entry(entry, options=stored, version=2)
+
+    return True
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a telegraf_mqtt config entry."""
     if Platform is None:
@@ -283,6 +409,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok and runtime_data.unsubscribe_snoop is not None:
         runtime_data.unsubscribe_snoop()
         runtime_data.unsubscribe_snoop = None
+    # Drop the recorded scope too, so a teardown that ran without the
+    # handle (mid-start failure) cannot leave ``_apply_auto_discover``
+    # believing a snoop is still subscribed to a filter it is not.
+    runtime_data.snoop_scope = None
+    runtime_data.snoop_exclude_filter = None
     if unload_ok and runtime_data.cancel_expiry is not None:
         runtime_data.cancel_expiry()
         runtime_data.cancel_expiry = None
@@ -299,10 +430,10 @@ class TelegrafMqttOptions:
 
     Phase 10: ``category_overrides`` and ``device_id_strategy`` are
     user-facing. ``auto_discover`` is also user-facing (default off --
-    the user must opt in via the options flow) and controls whether
-    the post-setup snoop listener runs. When it does run, the probe
-    topic is derived from the entry's ``topic_pattern`` so the snoop
-    never silently widens past the user's scope.
+    the user must opt in via the options flow) and controls whether the
+    post-setup snoop listener runs; ``auto_discover_scope`` is the
+    explicit, user-editable filter that listener subscribes to, so
+    nothing is widened implicitly.
     """
 
     expire_after: int
@@ -315,11 +446,50 @@ class TelegrafMqttOptions:
     category_overrides: dict[str, str | None]
     device_id_strategy: str
     auto_discover: bool
+    auto_discover_scope: str
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply options live without reloading the config entry."""
+    """Apply options live, or reload when the device-id strategy changed.
+
+    This is the single options-update listener. It also owns the reload
+    decision, and it MUST make that decision *before* calling
+    ``apply_options``.
+
+    Why the ordering is load-bearing: ``device_id_strategy`` feeds
+    ``DeviceManager._derive_device_id``, so a change invalidates every key
+    in ``self.devices`` (keyed by the old strategy's slugs). A live apply
+    cannot repair those registries -- rebuilding them changes every
+    entity's ``unique_id``, which the project documents as MAJOR-breaking.
+    Reloading is the only way to keep the entity registry consistent.
+
+    The previous implementation registered TWO listeners: a live-apply one
+    and a reload one, and relied on registration order. The live one ran
+    first and called ``apply_options(device_id_strategy=...)``, which
+    overwrites ``DeviceManager._device_id_strategy``. The reload one then
+    compared that already-mutated value against the incoming option and
+    found them equal, so ``async_reload`` was unreachable -- the reload
+    never fired. Comparing against
+    ``runtime_data.applied_device_id_strategy`` (captured at setup, before
+    any live apply) removes the ordering dependency entirely.
+    """
     options = _options_from_entry(entry)
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None or runtime.manager is None:
+        # Mid-unload, or a partially-initialised entry. There is nothing to
+        # apply and nothing to reload; bail rather than raise inside HA's
+        # update-listener machinery.
+        return
+
+    if runtime.applied_device_id_strategy != options.device_id_strategy:
+        _LOGGER.info(
+            "device_id_strategy changed from %s to %s; reloading the config entry so every device id is re-derived",
+            runtime.applied_device_id_strategy,
+            options.device_id_strategy,
+        )
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
+
     entry.runtime_data.manager.apply_options(
         expire_after=options.expire_after,
         exclude_patterns=options.exclude_patterns,
@@ -347,6 +517,7 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     # checks are idempotent create-or-delete calls and self-guard when
     # the issue registry is unavailable. The ``device_id_strategy``
     # reload path re-runs them after the rebuild via ``async_setup_entry``.
+    runtime.applied_device_id_strategy = options.device_id_strategy
     check_device_id_collision(hass, entry)
     check_device_id_conflict(hass, entry)
     # Also re-run the fleet-scale cap checks: a live options change
@@ -357,79 +528,105 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def _apply_auto_discover(hass: HomeAssistant, entry: ConfigEntry, options: TelegrafMqttOptions) -> None:
-    """Start or stop the post-setup snoop so it matches ``options.auto_discover``.
+    """Start, restart, or stop the auto-discover snoop to match the options.
 
     Shared by ``async_setup_entry`` (initial opt-in) and the live
-    options-update listener, so toggling the option takes effect
-    immediately in both directions instead of silently doing nothing
-    until the next reload -- or, worse, leaving a long-lived listener
-    subscribed and dispatching after the user disabled it. Idempotent:
-    an already-running snoop is never started twice, and stopping with
-    no listener parked is a no-op.
+    options-update listener, so a toggle takes effect immediately in both
+    directions instead of silently doing nothing until the next reload --
+    or, worse, leaving a long-lived listener subscribed and dispatching
+    after the user disabled it.
 
-    The snoop's ``dispatcher`` signature matches
-    ``DeviceManager.process_message(topic, payload)`` exactly, so it can
-    re-inject every captured message into the integration's primary
-    parse -> route -> render pipeline. The ``record_seen_host`` call
-    inside ``process_message`` keeps ``seen_hosts`` in sync with the
-    live state, which ``check_no_traffic`` consults for the Repairs
-    hint. The probe is derived from the user's ``topic_pattern``
-    (``derive_probe_topic``) so the snoop never silently widens past the
-    user's scope: a user on ``telegraf/rack1/#`` only ever gets rack1
-    traffic on the auto-discover path.
+    Three outcomes, keyed off the handle the runtime already parks:
+
+    * no listener + ``auto_discover`` on -> subscribe to
+      ``options.auto_discover_scope``;
+    * listener running + the scope or the main ``topic_pattern`` changed
+      -> stop it and start a fresh one. A scope change cannot be applied
+      by mutating the running listener, because ``SnoopListener`` reads
+      both filters from a per-message broker callback; and the restart is
+      cheap enough (one SUBSCRIBE / UNSUBSCRIBE round-trip) that a
+      stop-then-start is the right trade for a correct, single
+      subscription;
+    * listener running + nothing changed -> return. This is the common
+      case on every options save that touches anything else, and it is
+      what keeps the broker subscription count at exactly one.
+
+    Stopping with no listener parked is a no-op.
+
+    ``exclude_filter`` is the entry's own ``topic_pattern``, so the snoop
+    only ever dispatches messages the main subscription did not already
+    handle -- that is what makes the feature additive instead of
+    doubling every message's parse and dispatcher fan-out.
     """
     runtime = entry.runtime_data
     if mqtt is None or runtime is None or runtime.manager is None:
         return
-    if options.auto_discover:
+    topic_pattern = entry.data.get(CONF_TOPIC_PATTERN)
+    if not isinstance(topic_pattern, str) or not topic_pattern:
+        # Setup's own guard is the user-facing error; here it just means
+        # there is no valid filter to skip against, so do not start a
+        # snoop that would duplicate every message.
+        _LOGGER.debug("Auto-discover skipped: entry has no usable %s", CONF_TOPIC_PATTERN)
+        return
+
+    if not options.auto_discover:
         if runtime.unsubscribe_snoop is not None:
-            return
-        snoop = SnoopListener(
-            timeout_seconds=0.0,
-            probe_topic=derive_probe_topic(entry.data[CONF_TOPIC_PATTERN]),
-            dispatcher=runtime.manager.process_message,
-        )
-        try:
-            await snoop.start(hass, mqtt.async_subscribe)
-        except Exception as snoop_err:
-            # Snoop failure is non-fatal -- the main subscription is
-            # the user-facing path; log and move on without parking a
-            # teardown handle.
-            _LOGGER.debug("Snoop listener failed to start: %s", snoop_err)
-            snoop.stop()
-        else:
-            runtime.unsubscribe_snoop = snoop.stop
-            _LOGGER.info("Auto-discover snoop started on %s", entry.data[CONF_TOPIC_PATTERN])
-    elif runtime.unsubscribe_snoop is not None:
+            runtime.unsubscribe_snoop()
+            runtime.unsubscribe_snoop = None
+            _LOGGER.info("Auto-discover snoop stopped")
+        runtime.snoop_scope = None
+        runtime.snoop_exclude_filter = None
+        return
+
+    if (
+        runtime.unsubscribe_snoop is not None
+        and runtime.snoop_scope == options.auto_discover_scope
+        and runtime.snoop_exclude_filter == topic_pattern
+    ):
+        # Already subscribed to exactly the right pair of filters.
+        return
+
+    if runtime.unsubscribe_snoop is not None:
+        # A restart, not a second subscription: tear the old one down
+        # first so the broker never carries two snoop callbacks.
         runtime.unsubscribe_snoop()
         runtime.unsubscribe_snoop = None
-        _LOGGER.info("Auto-discover snoop stopped")
+        _LOGGER.debug("Auto-discover scope changed; restarting the snoop listener")
+
+    snoop = SnoopListener(
+        timeout_seconds=0.0,
+        probe_topic=options.auto_discover_scope,
+        dispatcher=runtime.manager.process_message,
+        exclude_filter=topic_pattern,
+    )
+    try:
+        await snoop.start(hass, mqtt.async_subscribe)
+    except Exception as snoop_err:
+        # Snoop failure is non-fatal -- the main subscription is the
+        # user-facing path; log and move on without parking a teardown
+        # handle, so the next options save retries from a clean state.
+        _LOGGER.debug("Snoop listener failed to start: %s", snoop_err)
+        snoop.stop()
+    else:
+        runtime.unsubscribe_snoop = snoop.stop
+        runtime.snoop_scope = options.auto_discover_scope
+        runtime.snoop_exclude_filter = topic_pattern
+        _LOGGER.info(
+            "Auto-discover snoop subscribed to %s (skipping anything already covered by %s)",
+            options.auto_discover_scope,
+            topic_pattern,
+        )
+    check_auto_discover_scope(hass, entry)
 
 
-async def _async_options_maybe_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry when ``device_id_strategy`` changed.
-
-    ``device_id_strategy`` feeds ``DeviceManager._derive_device_id`` at
-    the manager level, so a change invalidates every existing entry in
-    ``self.devices`` (keyed by the old strategy's slugs). A live
-    ``apply_options`` cannot fix the existing registries: rebuilding
-    them would also change every entity's ``unique_id``, which is
-    documented as MAJOR-breaking. Reloading the entry is the only
-    way to keep the entity-registry consistent.
-
-    All other option changes take the live path through
-    ``_async_options_updated`` -- including ``auto_discover``, whose
-    snoop listener is started/stopped in place there instead of
-    requiring a reload. This listener only fires the reload when the
-    strategy itself changed.
-    """
-    runtime = entry.runtime_data
-    if runtime is None or runtime.manager is None:
-        return
-    new_options = _options_from_entry(entry)
-    if runtime.manager.device_id_strategy == new_options.device_id_strategy:
-        return
-    await hass.config_entries.async_reload(entry.entry_id)
+# REMOVED (was ``_async_options_maybe_reload``):
+#   This was the second options-update listener. It compared
+#   ``runtime.manager.device_id_strategy`` -- the slot the FIRST listener had
+#   already overwritten via ``apply_options`` -- against the incoming option,
+#   so the comparison was always equal and ``async_reload`` was unreachable.
+#   The reload decision now lives in ``_async_options_updated`` and compares
+#   against ``runtime_data.applied_device_id_strategy``, which no live apply
+#   mutates. Tests: ``tests/test_phase10_ux.py`` drives the single listener.
 
 
 def _coerce_int_option(
@@ -467,6 +664,28 @@ def _coerce_bool_option(raw_options: dict[str, Any], key: str, default: bool) ->
     if not isinstance(value, bool):
         return default, True
     return value, False
+
+
+def _is_valid_filter(value: Any) -> bool:
+    """Return whether ``value`` is a usable MQTT subscription filter.
+
+    A ``telegraf/#``-shaped string with no illegal wildcard placement. The
+    options flow already rejects an invalid value before it is persisted,
+    so this exists for the *stored* config: a hand-edited ``.storage``, a
+    truncated write, or a value written by an older release. Duplicates
+    ``config_flow._valid_subscription_topic`` rather than importing it --
+    ``config_flow`` pulls in ``voluptuous`` and Home Assistant's
+    ``selector`` module, and this runs on the integration's import path.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    parts = value.split("/")
+    for index, part in enumerate(parts):
+        if "#" in part and (part != "#" or index != len(parts) - 1):
+            return False
+        if "+" in part and part != "+":
+            return False
+    return True
 
 
 def _normalize_options(
@@ -518,6 +737,15 @@ def _normalize_options(
     if bad:
         invalid.append(CONF_AUTO_DISCOVER)
 
+    # A scope the user typed is stored verbatim; a corrupt or empty one
+    # falls back to the documented default. It is a user-visible filter,
+    # so flag it for the Repairs panel rather than silently substituting
+    # a different subscription than the one on screen.
+    raw_scope = raw_options.get(CONF_AUTO_DISCOVER_SCOPE, DEFAULT_AUTO_DISCOVER_SCOPE)
+    auto_discover_scope = raw_scope if _is_valid_filter(raw_scope) else DEFAULT_AUTO_DISCOVER_SCOPE
+    if auto_discover_scope != raw_scope:
+        invalid.append(CONF_AUTO_DISCOVER_SCOPE)
+
     options = TelegrafMqttOptions(
         expire_after=expire_after,
         exclude_patterns=tuple(str(pattern) for pattern in raw_options.get(CONF_EXCLUDE_PATTERNS, [])),
@@ -532,6 +760,7 @@ def _normalize_options(
         },
         device_id_strategy=device_id_strategy,
         auto_discover=auto_discover,
+        auto_discover_scope=auto_discover_scope,
     )
     return options, invalid
 
@@ -600,15 +829,18 @@ def _schedule_expiry_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
         runtime_data.manager.check_expiry(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
         )
-        # cleanup() returns a list of removed metric keys (composite form).
-        # For each removal, fire SIGNAL_REMOVE_METRIC so the entity-registry
-        # cleanup in _handle_remove_metric actually drops the entity.
-        # prune_empty_devices is logged inside the manager itself.
-        for removed_key in runtime_data.manager.cleanup(
+        # cleanup() returns (device_id, unique_key) pairs. Fire
+        # SIGNAL_REMOVE_METRIC for each so the entity is dropped from HA's
+        # entity registry rather than left as an unavailable shell.
+        for device_id, unique_key in runtime_data.manager.cleanup(
             on_write=lambda metric_key, available, value: _dispatch_metric_updated(hass, entry, metric_key)
         ):
-            _dispatch_remove_metric(hass, entry, removed_key)
-        runtime_data.manager.prune_empty_devices()
+            _dispatch_remove_metric(hass, entry, device_id, unique_key)
+        # ``delete_delay``: retire whole devices whose host has gone silent,
+        # reporting every entity they still hold so those are removed too.
+        runtime_data.manager.prune_stale_devices(
+            on_remove=lambda device_id, unique_key: _dispatch_remove_metric(hass, entry, device_id, unique_key)
+        )
         # Phase 10: surface a Repairs hint if the snoop listener has had
         # at least one tick and no message matched the configured topic
         # pattern. Running this from the periodic callback (rather than
@@ -641,20 +873,31 @@ def _dispatch_new_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key: st
         )
 
 
-def _dispatch_remove_metric(hass: HomeAssistant, entry: ConfigEntry, metric_key: str) -> None:
-    """Dispatch the remove-metric signal so the entity-registry handler can drop the entity.
+def _dispatch_remove_metric(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    device_id: str,
+    unique_key: str,
+) -> None:
+    """Dispatch the remove-metric signal for one ``(device_id, unique_key)``.
 
-    The signal is fired from inside the periodic cleanup pass for every key
-    that the registry actually removed. The listener registered in
-    ``async_setup_entry`` looks up the entity by ``unique_id`` in HA's
-    entity registry and calls ``async_remove`` on it, preserving siblings
-    and the parent device.
+    Fired from the periodic cleanup pass for every metric the registry
+    removed, from ``prune_stale_devices`` for every entity a retired device
+    still held, and from ``MetricRegistry`` for the
+    ``platform_hint == "none"`` override.
+
+    The payload is a real 2-tuple rather than the ``"{device_id}:{unique_key}"``
+    string this used to send. The listener re-derives the entity's
+    ``unique_id`` from those two parts, and the string form could not be
+    split back unambiguously once a ``unique_key`` was allowed to contain a
+    ``:`` -- it silently produced a wrong lookup and an orphaned entity.
     """
     if async_dispatcher_send is not None:
         async_dispatcher_send(
             hass,
             SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
-            metric_key,
+            device_id,
+            unique_key,
         )
 
 
@@ -674,20 +917,29 @@ def _make_new_device_callback(hass: HomeAssistant, entry: ConfigEntry) -> Callab
     return on_new_device
 
 
-def remove_metric_entity(hass: HomeAssistant, composite_key: str) -> bool:
+def remove_metric_entity(hass: HomeAssistant, device_id: str, unique_key: str) -> bool:
+    """Delete the entity for one ``(device_id, unique_key)`` pair.
+
+    The platform's ``unique_id`` pattern is
+    ``f"{DOMAIN}_{state.device_id}_{descriptor.unique_key}"``, and both
+    parts are supplied separately here, so there is no string to
+    re-parse and no ambiguity about where the device ends and the metric
+    begins.
+
+    The lookup goes through ``async_get_entity_id``, HA's own O(1)
+    index. The previous implementation iterated every entity in the
+    instance -- across every platform -- on each removal, which is
+    O(total entities) per removed metric inside a periodic event-loop
+    callback.
+    """
     if er is None:
         return False
     registry = er.async_get(hass)
-    # The platform's unique_id pattern is
-    # ``f"{DOMAIN}_{state.device_id}_{descriptor.unique_key}"`` where
-    # ``state.device_id`` already contains ``_`` (it's the host slug) and
-    # ``descriptor.unique_key`` uses ``_`` between its parts. The composite
-    # key from cleanup uses ``:`` as the device/unique_key separator, so
-    # we translate that one separator back to ``_`` for the lookup.
-    target_unique_id = f"{DOMAIN}_{composite_key.replace(':', '_', 1)}"
-    for reg_entry in list(registry.entities.values()):
-        if reg_entry.platform == DOMAIN and reg_entry.unique_id == target_unique_id:
-            registry.async_remove(reg_entry.entity_id)
+    target_unique_id = f"{DOMAIN}_{device_id}_{unique_key}"
+    for platform in ("sensor", "binary_sensor"):
+        entity_id = registry.async_get_entity_id(platform, DOMAIN, target_unique_id)
+        if entity_id is not None:
+            registry.async_remove(entity_id)
             return True
     return False
 
@@ -709,8 +961,8 @@ def _listener_remove_metric(hass: HomeAssistant, entry: ConfigEntry) -> Callable
     if async_dispatcher_connect is None:
         return lambda: None
 
-    async def _on_remove(unique_key: str) -> None:
-        remove_metric_entity(hass, unique_key)
+    async def _on_remove(device_id: str, unique_key: str) -> None:
+        remove_metric_entity(hass, device_id, unique_key)
 
     return async_dispatcher_connect(
         hass,

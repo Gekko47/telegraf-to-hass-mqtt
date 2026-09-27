@@ -44,23 +44,35 @@ CONF_FIELD_OVERRIDE_ENTITY_CATEGORY = "entity_category"
 CONF_DEVICE_ID_STRATEGY = "device_id_strategy"
 DEFAULT_DEVICE_ID_STRATEGY = "host"
 VALID_DEVICE_ID_STRATEGIES = ("host", "host_topic", "topic_only")
-# Post-setup snoop listener: when enabled, auto-picks up new Telegraf
-# hosts that appear under the entry's ``topic_pattern``. Default is off
-# because the probe runs on the same broker; a careless default would
-# probe a wider scope than the user-configured ``topic_pattern``. The
-# user opts in via the options flow.
+# Post-setup snoop listener: when enabled, a SECOND subscription picks up
+# Telegraf hosts the entry's own ``topic_pattern`` misses, so they become
+# devices and entities without the user adding another config entry.
 #
-# When opted in, ``__init__.py`` derives the snoop's probe topic from the
-# entry's ``topic_pattern`` via ``derive_probe_topic`` -- the snoop never
-# silently widens past the user's scope. Topic discovery (the
-# pick-from-traffic flow) lives in the config flow, not the options flow.
+# Both halves are explicit and user-editable, because this is the one
+# place the integration deliberately subscribes beyond what the user
+# configured:
+#
+#   * ``auto_discover`` -- the opt-in switch. Default ``False``.
+#   * ``auto_discover_scope`` -- the exact filter the snoop subscribes to.
+#     It is independent of, and may be broader than, ``topic_pattern``.
+#     Nothing is widened implicitly; the user sees and edits the literal
+#     filter that will be subscribed.
+#
+# The snoop's ``exclude_filter`` is set to ``topic_pattern``, so a message
+# the main subscription already handles is recorded but NOT re-dispatched
+# (see ``SnoopListener._on_message``). That makes auto-discover purely
+# additive and removes the 2x parse + 2x dispatcher fan-out the previous
+# identity-function probe cost.
+#
+# The default scope is the whole Telegraf tree, which on a shared broker
+# is broader than a typical entry's ``topic_pattern``. That is a
+# documented, user-visible default for an opt-in feature -- not a silent
+# widening -- and ``check_auto_discover_scope`` warns when a scope can
+# only ever re-see what the entry already receives.
 CONF_AUTO_DISCOVER = "auto_discover"
 DEFAULT_AUTO_DISCOVER = False
-# Fallback used by ``SnoopListener`` and ``derive_probe_topic`` when no
-# pattern is supplied. Belt-and-braces: the integration always supplies a
-# pattern, so this only fires from code paths that haven't been wired up
-# yet.
-DEFAULT_AUTO_DISCOVER_PROBE_TOPIC = "telegraf/#"
+CONF_AUTO_DISCOVER_SCOPE = "auto_discover_scope"
+DEFAULT_AUTO_DISCOVER_SCOPE = "telegraf/#"
 DEFAULT_TOPIC_PATTERN = "telegraf/#"
 # Config-flow "discover topics" mode. The user enters a probe topic and a
 # scan window; the integration listens for that window, then presents the
@@ -87,6 +99,36 @@ DEFAULT_EXPIRE_AFTER = 120
 # ``expire_after`` values still get a sane cadence.
 MIN_EXPIRY_TICK_SECONDS = 5
 MAX_EXPIRY_TICK_SECONDS = 30
+# The "no traffic on topic" Repairs hint used to fire on "no message has
+# EVER arrived", checked every tick. Any host publishing more slowly than
+# ``expire_after`` tripped it, and because the check also cleared on the
+# next message, the issue flapped: created, auto-resolved, created again,
+# every cycle. Require sustained silence instead.
+NO_TRAFFIC_GRACE_SECONDS = 900
+# Ceilings on the per-entry seen-sets. A broker with high-cardinality
+# topic trees (per-container or per-interface topics) grew these without
+# bound for the life of the entry. Nothing depends on completeness:
+# ``check_no_traffic`` only reads the first few topics for its preview
+# and ``find_device_id_collisions`` only needs host tags, so the oldest
+# entries can simply be evicted.
+MAX_SEEN_TOPICS = 500
+MAX_SEEN_HOSTS = 100
+# Seconds to wait for the MQTT client to report a live connection before
+# giving up on this config entry. The wait is bounded on purpose: HA's
+# ``async_wait_for_mqtt_client`` resolves only on a client-connected event,
+# so with an unreachable broker an unbounded await leaves the entry stuck in
+# "setting up" forever -- no error, no retry, no user-facing message. 30s is
+# far longer than a healthy broker needs and short enough that a user
+# staring at a dead broker gets a translated "broker unreachable" message
+# and a normal HA retry cycle instead of a silent hang.
+BROKER_WAIT_TIMEOUT_SECONDS = 30
+# Bound on the reconfigure flow's subscribe pre-flight. The flow opens a
+# short-lived subscription on the *candidate* pattern before committing it
+# to ``entry.data``, so a typo or a broker that rejects the new filter
+# produces an immediate form error instead of a committed-and-broken entry.
+# 10s is far longer than a healthy broker needs for a SUBSCRIBE round-trip
+# and short enough that the dialog does not appear hung.
+RECONFIGURE_PREFLIGHT_TIMEOUT_SECONDS = 10
 # Fleet-scale guard: the number of distinct Telegraf hosts (devices)
 # a single config entry will track before it starts dropping new
 # measurements and raising a Repairs warning. A shared broker can
@@ -137,12 +179,19 @@ VALID_PLATFORM_HINTS = (
 # install that has accumulated candidates.
 DIAGNOSTICS_PENDING_CLEANUP_LIMIT = 50
 
-# Repairs issue ids.
+# Repairs translation keys. These are the single source of truth for the
+# key each Repairs issue is created under: ``repairs.py`` imports them
+# rather than inlining literals, so a rename is a one-site edit and a
+# key that is used but never defined in ``strings.json`` is a test
+# failure instead of a broken issue card in the user's UI.
 REPAIR_OVERLAP = "overlap_topic_patterns"
 REPAIR_INVALID_OPTION = "invalid_persisted_option"
 REPAIR_NO_TRAFFIC = "no_traffic_on_topic"
 REPAIR_DEVICE_ID_COLLISION = "device_id_collision"
 REPAIR_DEVICE_ID_CONFLICT = "device_id_conflict"
+REPAIR_DEVICE_CAP = "device_cap_reached"
+REPAIR_METRIC_CAP = "metric_cap_reached"
+REPAIR_AUTO_DISCOVER_SCOPE = "auto_discover_scope_redundant"
 
 SIGNAL_NEW_DEVICE = f"{DOMAIN}_new_device_{{entry_id}}"
 SIGNAL_NEW_METRIC = f"{DOMAIN}_new_metric_{{entry_id}}"

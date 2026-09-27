@@ -11,7 +11,9 @@ from custom_components.telegraf_mqtt.const import (
     CONF_AUTO_DISCOVER,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
+    CONF_DEVICE_ID_STRATEGY,
     CONF_DEVICE_NAME,
+    CONF_ENABLE_CLEANUP,
     CONF_EXCLUDE_PATTERNS,
     CONF_EXPIRE_AFTER,
     CONF_FIELD_OVERRIDES,
@@ -37,6 +39,13 @@ class FakeConfigEntries:
         self.unloaded.append((entry, platforms))
         return True
 
+    def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> bool:
+        # Real HA mutates the entry in place and schedules a save. The
+        # migration path uses this, so the fake has to as well.
+        for key, value in kwargs.items():
+            setattr(entry, key, value)
+        return True
+
 
 @dataclass
 class FakeHass:
@@ -52,10 +61,14 @@ class FakeConfigEntry:
         }
         self.options = options or {}
         self.runtime_data = None
+        self.title = "Telegraf MQTT"
+        # Config-entry schema version. The integration is at v2; tests that
+        # exercise the migration set this back to 1.
+        self.version = 2
         self._unload_callbacks: list[Callable[[], None]] = []
         # Real HA records every listener and fires them all; this fake
         # previously kept only the last one, which broke when Phase 10
-        # registered a second listener (``_async_options_maybe_reload``).
+        # registered a second listener. Phase 1 collapsed that back to one.
         self._update_listeners: list[Callable[[FakeHass, FakeConfigEntry], Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
@@ -79,6 +92,16 @@ class FakeMqtt:
         # Every subscribe attempt in order -- the live auto-discover
         # toggle tests count main + snoop subscriptions explicitly.
         self.subscribe_calls: list[tuple[str, Callable[[Any], Any]]] = []
+
+    async def async_wait_for_mqtt_client(self, _hass: Any) -> None:
+        """Mirror the real HA API.
+
+        The integration used to guard this call behind ``hasattr``, which
+        let this double omit it and quietly defined the contract from the
+        fake side. The guard is gone at the declared 2026.6.0 floor, so
+        every double now implements the real surface.
+        """
+        return None
 
     async def async_subscribe(
         self, hass: FakeHass, topic_pattern: str, callback: Callable[[Any], Any]
@@ -116,8 +139,11 @@ def _patch_runtime(monkeypatch) -> tuple[FakeMqtt, list[tuple[str, str]]]:
     fake_mqtt = FakeMqtt()
     dispatched: list[tuple[str, str]] = []
 
-    def fake_dispatch(hass: FakeHass, signal: str, unique_key: str) -> None:
-        dispatched.append((signal, unique_key))
+    def fake_dispatch(hass: FakeHass, signal: str, *payload: Any) -> None:
+        # ``SIGNAL_REMOVE_METRIC`` carries a ``(device_id, unique_key)``
+        # 2-tuple while the other signals carry a single string, so record
+        # the single-arg case unwrapped and the multi-arg case as a tuple.
+        dispatched.append((signal, payload[0] if len(payload) == 1 else payload))
 
     def fake_dispatcher_connect(_hass: FakeHass, _signal: str, _target: Callable[..., Any]) -> Callable[[], None]:
         # Tests in this module don't exercise the entity-registry removal
@@ -242,6 +268,101 @@ def test_options_update_reruns_device_id_repairs_immediately(monkeypatch) -> Non
     assert calls == ["collision", "conflict", "collision", "conflict"]
 
 
+# ---------------------------------------------------------------------------
+# WS-G (M8): schema migration and the corrupt-entry setup guard.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_backfills_missing_option_keys_without_clobbering(monkeypatch) -> None:
+    """v1 -> v2 fills in absent keys and leaves present ones untouched.
+
+    The migration is deliberately additive: ``_normalize_options`` already
+    falls back to the same defaults, so a sparse entry is semantically
+    identical before and after. What it buys is visibility -- ``.storage``
+    now records what the integration is actually running.
+    """
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 900, CONF_CLEANUP_DELAY: 42})
+    entry.version = 1
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    # Values the user had set survive untouched.
+    assert entry.options[CONF_EXPIRE_AFTER] == 900
+    assert entry.options[CONF_CLEANUP_DELAY] == 42
+    # Absent ones are now explicit.
+    assert entry.options[CONF_ENABLE_CLEANUP] is True
+    assert entry.options[CONF_DEVICE_ID_STRATEGY] == "host"
+    assert entry.options[CONF_EXCLUDE_PATTERNS] == []
+    assert entry.version == 2
+
+
+def test_migration_of_sparse_v1_entry_is_semantically_identical(monkeypatch) -> None:
+    """A never-configured entry (``options == {}``) migrates to the defaults.
+
+    This is the backward-compatibility gate: a v1 entry with no stored
+    options must behave identically after the migration.
+    """
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={})
+    entry.version = 1
+
+    before = integration._options_from_entry(entry)
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+    after = integration._options_from_entry(entry)
+
+    assert before == after
+    assert entry.version == 2
+
+
+def test_migration_is_a_noop_for_a_current_v2_entry(monkeypatch) -> None:
+    """Re-running the migration on a v2 entry changes nothing."""
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 7})
+    entry.version = 2
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+    assert entry.options == {CONF_EXPIRE_AFTER: 7}
+    assert entry.version == 2
+
+
+def test_migration_refuses_an_entry_from_the_future(monkeypatch) -> None:
+    """A downgrade must not corrupt a newer entry's data."""
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={CONF_EXPIRE_AFTER: 7})
+    entry.version = 3
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is False
+    assert entry.options == {CONF_EXPIRE_AFTER: 7}
+    assert entry.version == 3
+
+
+def test_setup_reports_a_corrupt_entry_instead_of_raising_keyerror(monkeypatch) -> None:
+    """A missing ``topic_pattern`` fails with a translated error, not KeyError.
+
+    ``entry.data[CONF_TOPIC_PATTERN]`` used to raise a bare ``KeyError``
+    here. That is not a retryable error, so HA re-ran setup forever with a
+    raw traceback and the user got no explanation at all.
+    """
+    from homeassistant.exceptions import HomeAssistantError
+
+    _fake_mqtt, _dispatched = _patch_runtime(monkeypatch)
+    hass = FakeHass()
+    entry = FakeConfigEntry(options={})
+    entry.data = {CONF_DEVICE_NAME: "Telegraf"}  # no topic_pattern
+
+    try:
+        asyncio.run(integration.async_setup_entry(hass, entry))
+    except HomeAssistantError as err:
+        assert err.translation_key == "missing_topic_pattern"
+    else:  # pragma: no cover - only reachable on a regression
+        raise AssertionError("a corrupt entry must not set up silently")
+
+
 def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     monkeypatch,
 ) -> None:
@@ -262,7 +383,10 @@ def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     assert entry.runtime_data.manager._cleanup_delay == 30
     assert entry.runtime_data.manager._delete_delay == 60
     assert registry._cleanup_delay == 30
-    assert registry._delete_delay == 60
+    # ``delete_delay`` is a MANAGER-level option: it gates whole-device
+    # pruning, so it is deliberately NOT fanned out to per-device
+    # registries any more (the per-registry field was written and never read).
+    assert not hasattr(registry, "_delete_delay")
 
     # Live update via the entry's update listener -- the same path
     # ``add_update_listener`` fires when the user changes OptionsFlow values.
@@ -275,7 +399,6 @@ def test_options_update_propagates_cleanup_and_delete_delays_without_reload(
     # Existing per-device registry also picked up the change (not just
     # newly-discovered devices created via ``get_or_create_registry``).
     assert registry._cleanup_delay == 5
-    assert registry._delete_delay == 9
 
 
 def test_live_update_recovers_invalid_persisted_values_without_reload(
@@ -466,7 +589,9 @@ def test_scheduled_cleanup_dispatches_update_for_always_metric(monkeypatch) -> N
 
     assert dispatched == [
         (SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
-        (SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id), "host1:mem_used_percent"),
+        # SIGNAL_REMOVE_METRIC carries a (device_id, unique_key) 2-tuple,
+        # not a re-joined composite string.
+        (SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id), ("host1", "mem_used_percent")),
     ]
 
 

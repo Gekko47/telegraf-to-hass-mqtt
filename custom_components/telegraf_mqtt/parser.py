@@ -72,15 +72,6 @@ class ParserStats:
     unknown_measurement_fallbacks: int = 0
     last_message: dict[str, Any] | None = None
 
-    def note_received(self, topic: str, byte_length: int) -> None:
-        self.received += 1
-        self.last_message = {
-            "topic": topic,
-            "byte_length": byte_length,
-            "dropped_reason": None,
-            "measurement": None,
-        }
-
     def note_dropped(self, topic: str, byte_length: int, reason: str) -> None:
         self.received += 1
         if reason == "invalid_json":

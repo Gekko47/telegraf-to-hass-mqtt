@@ -18,6 +18,8 @@ from .const import (
     DEFAULT_DEVICE_ID_STRATEGY,
     DEFAULT_MAX_DEVICES,
     MAX_METRICS_PER_DEVICE,
+    MAX_SEEN_HOSTS,
+    MAX_SEEN_TOPICS,
     PLATFORM_HINT_AUTO,
     PLATFORM_HINT_NONE,
     VALID_DEVICE_ID_STRATEGIES,
@@ -158,21 +160,26 @@ class MetricRegistry:
         device_id: str = "default",
         device_name: str = "Telegraf MQTT",
         cleanup_delay: int = 30 * 24 * 60 * 60,
-        delete_delay: int = 60 * 24 * 60 * 60,
         category_overrides: dict[str, str | None] | None = None,
         device_id_strategy: str = DEFAULT_DEVICE_ID_STRATEGY,
         max_metrics_per_device: int = MAX_METRICS_PER_DEVICE,
+        on_remove: Callable[[str, str], None] | None = None,
     ) -> None:
         self._expire_after = expire_after
         self._clock = clock or monotonic
         self._exclude_patterns = exclude_patterns
         self._field_overrides = field_overrides or {}
+        # Fired as ``(device_id, unique_key)`` whenever a metric leaves this
+        # registry for good -- currently only the ``platform_hint == "none"``
+        # path. The integration turns that into a SIGNAL_REMOVE_METRIC so
+        # the entity is deleted from HA's entity registry rather than left
+        # behind as a permanently-unavailable shell.
+        self._on_remove = on_remove
         self._states: dict[str, MetricState] = {}
         self.device_id = device_id
         self.device_name = device_name
         self.last_any_metric = 0.0
         self._cleanup_delay = cleanup_delay
-        self._delete_delay = delete_delay
         self._category_overrides = category_overrides or {}
         self._device_id_strategy = (
             device_id_strategy if device_id_strategy in VALID_DEVICE_ID_STRATEGIES else DEFAULT_DEVICE_ID_STRATEGY
@@ -187,7 +194,6 @@ class MetricRegistry:
         exclude_patterns: tuple[str, ...] | None = None,
         field_overrides: dict[str, dict[str, Any]] | None = None,
         cleanup_delay: int | None = None,
-        delete_delay: int | None = None,
         category_overrides: dict[str, str | None] | None = None,
         device_id_strategy: str | None = None,
         on_write: Callable[[str, bool, Any], None] | None = None,
@@ -202,8 +208,6 @@ class MetricRegistry:
             self._expire_after = expire_after
         if cleanup_delay is not None:
             self._cleanup_delay = cleanup_delay
-        if delete_delay is not None:
-            self._delete_delay = delete_delay
         if device_id_strategy is not None and device_id_strategy in VALID_DEVICE_ID_STRATEGIES:
             self._device_id_strategy = device_id_strategy
         if category_overrides is not None:
@@ -253,6 +257,29 @@ class MetricRegistry:
     def get(self, unique_key: str) -> MetricState | None:
         """Return the current state for a key if one already exists."""
         return self._states.get(unique_key)
+
+    @property
+    def available_count(self) -> int:
+        """Return how many metrics in this registry are currently available.
+
+        This is the *live* count the device-level ``min_active_metrics``
+        floor is evaluated against, in ``DeviceManager.cleanup``. A device
+        below the floor is left completely alone so a host that is still
+        reporting something never has its last entities stripped away.
+        """
+        return sum(1 for state in self._states.values() if state.is_available)
+
+    @property
+    def measurements(self) -> frozenset[str]:
+        """Return the distinct Telegraf measurement names this registry holds.
+
+        Public read-only projection for the diagnostics payload, which
+        needs "which measurements does this device expose" and must not
+        reach into ``_states`` to answer it. Returns a ``frozenset`` so a
+        caller cannot mutate the registry's view of itself, and so the
+        diagnostics module can sort it without a defensive copy.
+        """
+        return frozenset(state.descriptor.measurement for state in self._states.values())
 
     def keys(self) -> tuple[str, ...]:
         """Return known metric keys."""
@@ -388,11 +415,20 @@ class MetricRegistry:
         from the user surface entirely. The state is gone in both the
         "never seen" and "transition from another hint" cases; what
         differs is whether the prior owner needs an ``on_write(False, ...)``
-        so the platform listener can remove the entity.
+        and an ``on_remove`` so the entity is dropped from HA's registry.
+
+        ``on_write(False, ...)`` alone is NOT sufficient. Both platforms'
+        routing listeners return early when ``get_metric`` yields None, so
+        an availability flip for a metric that no longer exists produces no
+        ``SIGNAL_REMOVE_METRIC`` and the entity lingers forever as a
+        permanently-``unavailable`` shell. The dedicated removal callback
+        is what actually reconciles the entity registry.
         """
         existing = self._states.pop(raw_descriptor.unique_key, None)
         if existing is not None and on_write is not None:
             on_write(metric_key or descriptor.unique_key, False, existing.descriptor.value)
+        if existing is not None and self._on_remove is not None:
+            self._on_remove(self.device_id, raw_descriptor.unique_key)
         return False
 
     def _register_new_metric(
@@ -592,10 +628,18 @@ class DeviceManager:
         self._on_write: Callable[[str, bool, Any], None] | None = None
         self._on_discovered: Callable[[str], None] | None = None
         self._on_new_device: Callable[[str, str], None] | None = None
+        # ``(device_id, unique_key)`` for a metric that leaves a registry for
+        # good. Wired into every per-device registry so the
+        # ``platform_hint == "none"`` override can actually delete the entity
+        # instead of leaving a permanently-unavailable shell behind.
+        self._on_remove: Callable[[str, str], None] | None = None
         # Phase 10: the snoop listener feeds ``record_seen_host`` for every
         # incoming message. The Repairs framework consults
         # ``seen_hosts`` and ``first_message_at`` to raise a hint when the
         # user's configured topic pattern matches no traffic.
+        # When this manager was built, so the "no traffic" Repairs hint can
+        # give a brand-new entry a grace window before warning.
+        self._started_at = self._clock()
         self._seen_hosts: set[str] = set()
         self._seen_topics: set[str] = set()
         self.first_message_at: float | None = None
@@ -628,6 +672,7 @@ class DeviceManager:
         on_write: Callable[[str, bool, Any], None] | None = None,
         on_discovered: Callable[[str], None] | None = None,
         on_new_device: Callable[[str, str], None] | None = None,
+        on_remove: Callable[[str, str], None] | None = None,
     ) -> None:
         """Wire the persistent pipeline callbacks (MQTT transport → dispatcher signals).
 
@@ -640,6 +685,12 @@ class DeviceManager:
             self._on_discovered = on_discovered
         if on_new_device is not None:
             self._on_new_device = on_new_device
+        if on_remove is not None:
+            self._on_remove = on_remove
+            # Registries constructed before this callback existed captured
+            # the old None; push it down so none of them is stranded.
+            for registry in self.devices.values():
+                registry._on_remove = on_remove
 
     def get(self, metric_key: str) -> MetricState | None:
         """Resolve a metric key across all known device registries."""
@@ -697,10 +748,10 @@ class DeviceManager:
             device_id=device_id,
             device_name=device_name,
             cleanup_delay=self._cleanup_delay,
-            delete_delay=self._delete_delay,
             category_overrides=self._category_overrides,
             device_id_strategy=self._device_id_strategy,
             max_metrics_per_device=self._max_metrics_per_device,
+            on_remove=self._on_remove,
         )
         self.devices[device_id] = registry
         registry.device_name = device_name
@@ -724,8 +775,8 @@ class DeviceManager:
 
         Phase 6: ``enable_cleanup`` and ``min_active_metrics`` are fan-out
         manager-level tunables (no per-registry equivalent). ``expire_after``,
-        ``exclude_patterns``, ``field_overrides``, ``cleanup_delay`` and
-        ``delete_delay`` are propagated to each per-device registry as well
+        ``exclude_patterns``, ``field_overrides`` and ``cleanup_delay`` are
+        propagated to each per-device registry as well
         so existing registries pick up live value changes (and the stored
         manager-level values are what ``get_or_create_registry`` uses for
         any device discovered after the update).
@@ -759,7 +810,6 @@ class DeviceManager:
                 exclude_patterns=exclude_patterns,
                 field_overrides=field_overrides,
                 cleanup_delay=self._cleanup_delay,
-                delete_delay=self._delete_delay,
                 category_overrides=category_overrides,
                 device_id_strategy=device_id_strategy,
                 on_write=(None if on_write is None else self._registry_on_write(device_id, on_write)),
@@ -787,7 +837,11 @@ class DeviceManager:
         on_discovered = on_discovered if on_discovered is not None else self._on_discovered
         on_new_device = on_new_device if on_new_device is not None else self._on_new_device
 
-        descriptors = parser.parse(payload)
+        # WS-E2: pass the topic through. Without it the parser stamps
+        # ``"<unknown>"`` into ``ParserStats.last_message``, so the one field
+        # that tells a user *which* topic is misbehaving is permanently
+        # useless in a diagnostics download.
+        descriptors = parser.parse(payload, topic=topic)
         # Phase 10: track every incoming message for the snoop listener's
         # seen_hosts / seen_topics sets, even if the parser dropped the
         # payload. ``first_message_at`` / ``last_message_at`` feed the
@@ -853,8 +907,18 @@ class DeviceManager:
         self.last_message_at = now
         if host:
             self._seen_hosts.add(host)
+            # Bounded: a broker with high-cardinality hosts must not grow
+            # this for the life of the entry. The set is only ever read as
+            # "have we seen any of these", never enumerated for
+            # completeness, so evicting the oldest is safe.
+            while len(self._seen_hosts) > MAX_SEEN_HOSTS:
+                self._seen_hosts.pop()
         if topic:
             self._seen_topics.add(topic)
+            # ``check_no_traffic`` renders a preview from the first few
+            # topics; nothing needs the set to be complete.
+            while len(self._seen_topics) > MAX_SEEN_TOPICS:
+                self._seen_topics.pop()
 
     @property
     def device_id_strategy(self) -> str:
@@ -866,7 +930,8 @@ class DeviceManager:
         The strategy feeds ``_derive_device_id`` at the manager level,
         so a change invalidates every existing ``self.devices`` key --
         a live apply cannot fix the old registries, only a config-entry
-        reload can. See ``_async_options_maybe_reload``.
+        reload can. See ``_async_options_updated`` in ``__init__``, which owns
+        that decision.
         """
         return self._device_id_strategy
 
@@ -881,8 +946,49 @@ class DeviceManager:
         return frozenset(self._seen_topics)
 
     def has_received_messages(self) -> bool:
-        """Return whether any MQTT message has reached the snoop listener."""
+        """Return whether ANY MQTT message has ever reached this entry.
+
+        Retained as a plain "did we ever hear anything" predicate. The
+        Repairs hint no longer keys off this -- a single message in the
+        entry's whole lifetime is too weak a signal to warn a user with --
+        and uses the two accessors below instead.
+        """
         return self.first_message_at is not None
+
+    def seconds_since_last_message(self) -> float | None:
+        """Seconds since the last message, or ``None`` if none ever arrived."""
+        if self.last_message_at is None:
+            return None
+        return max(0.0, self._clock() - self.last_message_at)
+
+    def seconds_since_first_message(self) -> float | None:
+        """Seconds since the FIRST message, or ``None`` if none ever arrived."""
+        if self.first_message_at is None:
+            return None
+        return max(0.0, self._clock() - self.first_message_at)
+
+    def now(self) -> float:
+        """Return the current reading of this manager's injected clock.
+
+        Public read-only accessor so surfaces outside the registry (the
+        diagnostics payload) can compute an age against the SAME clock the
+        registry itself uses, instead of calling the private ``_clock`` or
+        substituting ``time.time``. The distinction is load-bearing in
+        tests, which inject a fake clock: a diagnostics age computed from a
+        different time source than ``last_any_metric`` would be nonsense,
+        and a test double that happened to expose ``_clock`` would be
+        silently satisfying production code instead of the real contract.
+        """
+        return self._clock()
+
+    def seconds_since_startup(self) -> float:
+        """Seconds since this manager was constructed.
+
+        The anchor the ``no_traffic`` hint needs for the "no message has
+        EVER arrived" case: without it a brand-new entry is warned before
+        Telegraf's first publish interval has even elapsed.
+        """
+        return max(0.0, self._clock() - self._started_at)
 
     def find_device_id_collisions(self) -> dict[str, list[str]]:
         """Return device_id slugs produced by more than one distinct ``host`` tag.
@@ -1013,8 +1119,19 @@ class DeviceManager:
         for device_id, registry in self.devices.items():
             registry.check_expiry(on_write=(None if on_write is None else self._registry_on_write(device_id, on_write)))
 
-    def cleanup(self, *, on_write: Callable[[str, bool, Any], None] | None = None) -> list[str]:
-        """Run cleanup across every ACTIVE device registry, returning composite keys.
+    def cleanup(
+        self,
+        *,
+        on_write: Callable[[str, bool, Any], None] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Run cleanup across every ACTIVE device registry.
+
+        Returns ``(device_id, unique_key)`` pairs -- a real 2-tuple, not the
+        ``"{device_id}:{unique_key}"`` string this used to build. The
+        composite-string form was spliced apart again downstream to build
+        the entity's ``unique_id``, which silently mis-split any metric whose
+        ``unique_key`` itself contained a ``:``. The pair is unambiguous by
+        construction.
 
         Phase 6 changes:
         - When ``enable_cleanup`` is False, this is a complete no-op: nothing
@@ -1022,71 +1139,81 @@ class DeviceManager:
           in every device forever. (Useful for users who want a pure
           "discovery + expiry" integration with no deletion.)
         - The per-registry ``min_active_metrics`` guard skips a device when
-          it has fewer than the threshold *available* metrics. The intent is
-          to keep at least one entity per device alive even when most
-          metrics have become Cleanup Candidates; an empty device is still
-          a candidate for ``prune_empty_devices`` once the heartbeat
-          expires.
+          it has fewer than the threshold *available* metrics, so a device
+          is never emptied from under the user while it is still reporting.
         - Offline devices (no heartbeat within ``expire_after``) are skipped
-          entirely -- their entities are never cleaned up, matching the
-          pre-Phase-6 contract.
+          entirely. Their entities are removed by ``prune_stale_devices``
+          once ``delete_delay`` has elapsed, not here.
         """
         if not self._enable_cleanup:
             return []
 
-        removed: list[str] = []
+        removed: list[tuple[str, str]] = []
         now = self._clock()
         for device_id, registry in self.devices.items():
             if now - registry.last_any_metric > self._expire_after:
                 continue
-            available_count = sum(1 for state in registry._states.values() if state.is_available)
-            if available_count < self._min_active_metrics:
+            if registry.available_count < self._min_active_metrics:
                 # Leave every entity in this registry alone: the device is
-                # already near-empty, and pruning it to zero would let
-                # prune_empty_devices pick it up on the same tick. The
-                # user-facing effect: cleanup is a no-op for a device
-                # that's already at the floor.
-                #
-                # Coverage note: the branch IS hit by
-                # test_min_active_metrics_protects_devices_below_floor, but
-                # coverage.py counts the multi-statement if/continue as one
-                # statement, so the pragma stays.
-                continue  # pragma: no cover
+                # already near-empty, and taking it to zero would strip the
+                # user of every entity on a host that is still reporting
+                # something. The device-level floor is enforced here; whole
+                # devices are retired by ``prune_stale_devices`` instead.
+                continue
             for unique_key in registry.cleanup(
                 on_write=(None if on_write is None else self._registry_on_write(device_id, on_write))
             ):
-                removed.append(f"{device_id}:{unique_key}")
+                removed.append((device_id, unique_key))
         return removed
 
-    def prune_empty_devices(self) -> list[str]:
-        """Drop devices that have been empty for >= ``delete_delay`` seconds.
+    def prune_stale_devices(
+        self,
+        *,
+        on_remove: Callable[[str, str], None] | None = None,
+    ) -> list[str]:
+        """Drop devices whose host has been silent for >= ``delete_delay``.
 
-        Phase 6 lifecycle: a device is removed when (a) it has zero metrics
-        left and (b) its last heartbeat is older than ``delete_delay``. The
-        device can always reappear later when a new message arrives --
-        ``get_or_create_registry`` will create a fresh registry on demand.
+        This is what the user-facing ``delete_delay`` option controls: the
+        automatic entity cleaning for a host that has gone away. It is keyed
+        on the **heartbeat**, not on emptiness, and that distinction is the
+        whole point.
 
-        The heartbeat update inside ``process_message`` already prevents
-        this method from pruning a device that's actively reporting empty
-        payloads (which are very rare but possible). Devices with at least
-        one metric are never pruned here, regardless of age.
+        The previous implementation required ``len(registry) == 0`` before
+        pruning, which made it unreachable. Nothing can empty a registry for
+        a device that has gone silent, because ``cleanup`` skips devices
+        with a stale heartbeat AND skips devices below ``min_active_metrics``
+        -- and a host that stops publishing trips both guards at once. The
+        result was that ``delete_delay`` never fired at all, and because
+        ``get_or_create_registry`` gates NEW devices on
+        ``len(self.devices) >= max_devices``, every departed host held a
+        device-cap slot forever until live hosts were silently dropped.
+
+        A pruned device can always reappear: ``get_or_create_registry``
+        creates a fresh registry on the next message from that host.
+
+        Every metric still held by a pruned device is reported through
+        ``on_remove`` so the integration can delete the corresponding
+        entities from HA's entity registry. Without that the prune would
+        orphan entities rather than clean them.
+
+        Gated on ``enable_cleanup`` for consistency with ``cleanup``: a user
+        who turns cleanup off expects nothing to be deleted, and the previous
+        implementation pruned devices regardless of that flag.
         """
+        if not self._enable_cleanup:
+            return []
+
         now = self._clock()
         removed: list[str] = []
         for device_id, registry in list(self.devices.items()):
-            if len(registry) > 0:
-                continue
             if now - registry.last_any_metric <= self._delete_delay:
                 continue
+            if on_remove is not None:
+                for unique_key in list(registry.keys()):
+                    on_remove(device_id, unique_key)
             removed.append(device_id)
             self.devices.pop(device_id, None)
-            # Logging is a user-facing surface for stale-devices: the
-            # operator should see when a host went away. The logger is
-            # re-resolved through ``logging.getLogger`` so importing this
-            # module at runtime can be done lazily in tests.
-            import logging as _logging
-
-            _logging.getLogger(__name__).info("Pruned empty Telegraf device %s", device_id)
+            _LOGGER.info("Pruned stale Telegraf device %s", device_id)
         return removed
 
     def __len__(self) -> int:

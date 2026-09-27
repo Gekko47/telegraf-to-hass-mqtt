@@ -55,11 +55,23 @@
           "enable_cleanup": "Enable automatic cleanup",
           "cleanup_delay": "Cleanup delay (seconds)",
           "delete_delay": "Delete delay (seconds)",
-          "min_active_metrics": "Minimum active metrics per device"
+          "min_active_metrics": "Minimum active metrics per device",
+          "auto_discover": "Auto-discover new Telegraf hosts",
+          "auto_discover_scope": "Auto-discover scope",
+          "device_id_strategy": "Device id strategy"
         },
         "data_description": {
           "exclude_patterns": "Glob patterns matched against each metric's unique key; matching metrics are hidden and marked unavailable.",
-          "category_overrides": "Map of metric unique keys -- or glob patterns like mem_* -- to config, diagnostic, or null. An exact key always wins over a glob; the first matching glob in definition order is used."
+          "category_overrides": "Map of metric unique keys -- or glob patterns like mem_* -- to config, diagnostic, or null. An exact key always wins over a glob; the first matching glob in definition order is used.",
+          "auto_discover": "Run a second MQTT subscription that feeds newly-seen Telegraf hosts into this entry so they appear without adding another config entry. Off by default.",
+          "auto_discover_scope": "The MQTT filter the auto-discover subscription listens on. It is independent of this entry's topic pattern and may be broader, so any host publishing under it becomes a device. Messages already covered by the topic pattern are skipped, so only genuinely new hosts are added. On a broker shared with other systems this is an access-relevant subscription: choose a scope no broader than you intend this entry to consume.",
+          "device_id_strategy": "How one Home Assistant device per Telegraf host is identified. \"Host tag\" trusts the host tag in the payload. \"Host tag, then topic segment\" falls back to the second topic level when the host tag is a default like localhost. \"Topic tree only\" ignores the host tag entirely.",
+          "field_overrides": "Per-field overrides keyed by field name. Each entry may set platform (auto, sensor, binary_sensor or none), native_unit, device_class and state_class.",
+          "expire_after": "Seconds without an update before a metric is reported as unavailable. Defaults to 120; Telegraf's own default publish interval is 10-60s, so keep this above it.",
+          "enable_cleanup": "Automatically remove entities and whole devices that stop reporting. When off, nothing is ever deleted -- metrics only go unavailable.",
+          "cleanup_delay": "Seconds a stale metric must stay stale, on a host that is still reporting, before its entity is removed. Defaults to 30 days.",
+          "delete_delay": "Seconds a whole host must stay completely silent before its device and all of its entities are removed. This is what stops a departed host from occupying a device slot forever. Defaults to 60 days.",
+          "min_active_metrics": "Never strip a device below this many currently-available metrics. Prevents a host from losing every entity while it is still partly reporting."
         }
       },
       "scan_running": {
@@ -72,10 +84,14 @@
       "invalid_duration": "Enter a duration between 5 and 300 seconds.",
       "no_traffic_on_scan_root": "No traffic was seen on the scan root topic during the scan window. Try a wider scan root (e.g. telegraf/#) or run the scan again when more devices are publishing.",
       "no_topics_selected": "Pick a topic prefix to subscribe to.",
-      "required": "This field is required."
+      "required": "This field is required.",
+      "scan_failed": "The broker refused the scan subscription, so no topics could be discovered. Check that the broker is reachable and that this integration is allowed to subscribe to that topic.",
+      "cannot_connect": "The broker refused the subscription on this topic, so the new topic pattern was not saved. The previous pattern is still active. Check that the broker is reachable and that this integration is allowed to subscribe to that topic."
     },
     "abort": {
-      "already_configured": "This topic pattern is already configured."
+      "already_configured": "This topic pattern is already configured.",
+      "reconfigure_successful": "The entry was reconfigured and reloaded with the new settings.",
+      "cannot_connect": "The new MQTT topic pattern could not be subscribed to, so nothing was changed."
     },
     "progress": {
       "scan_running": "Listening to {probe} for {duration} seconds. Newly seen topics will be collected when the scan completes."
@@ -97,6 +113,22 @@
     "metric_cap_reached": {
       "title": "Telegraf MQTT metric cap reached",
       "description": "This entry has dropped {dropped} new metrics because the per-device metric cap ({max_metrics_per_device}) was reached on at least one device. Metrics beyond the cap are being ignored for \"{configured_topic}\"."
+    },
+    "no_traffic_on_topic": {
+      "title": "No Telegraf traffic on the configured topic",
+      "description": "No message has arrived on the MQTT topic pattern \"{configured_topic}\" since this entry was set up. Seen topics so far: {seen_topics}. Check that Telegraf is configured to publish line-protocol-over-JSON to that topic, that the topic pattern in this entry matches, and that the broker's ACLs allow this integration to subscribe to it."
+    },
+    "device_id_collision": {
+      "title": "Telegraf host tags collapsed onto one device",
+      "description": "These host tags produced the same device id and were merged into a single device: {description}. This is usually Telegraf's default host value (for example \"localhost\" or the container id) being inherited by more than one agent. Set a distinct `hostname` in each Telegraf agent's `[agent]` config, or switch this entry's device id strategy to \"Host tag, then topic segment\" so the topic tree disambiguates them."
+    },
+    "device_id_conflict": {
+      "title": "Two Telegraf MQTT entries produce the same device",
+      "description": "More than one config entry is reporting the same device id: {conflicts}. Their entities will be merged onto one device in Home Assistant. Adjust one entry's topic pattern, or its device id strategy, so each entry covers a distinct set of hosts."
+    },
+    "auto_discover_scope_redundant": {
+      "title": "Auto-discover scope adds nothing",
+      "description": "Auto-discover is on with the scope \"{auto_discover_scope}\", but this entry's topic pattern \"{configured_topic}\" already covers all of it -- so every message the extra subscription receives is skipped as a duplicate and no new host can ever be discovered. Either widen the auto-discover scope to include topics this entry does not already cover, or turn auto-discover off."
     }
   },
   "exceptions": {
@@ -105,6 +137,9 @@
     },
     "mqtt_broker_unreachable": {
       "message": "Could not reach the MQTT broker to subscribe to {topic}: {error}. Home Assistant will keep retrying."
+    },
+    "missing_topic_pattern": {
+      "message": "The entry \"{entry_title}\" has no MQTT topic pattern stored, so it cannot start. Reconfigure the entry and set a topic pattern, or remove and re-add it."
     }
   },
   "entity": {

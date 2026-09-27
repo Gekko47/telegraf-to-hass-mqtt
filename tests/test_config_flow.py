@@ -7,18 +7,34 @@ flow manager.
 
 from __future__ import annotations
 
+import copy
+
+import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.telegraf_mqtt.config_flow import (
     TelegrafMqttConfigFlow,
+    _build_options_schema,
+    _clean_options,
     _default_device_name,
     _roll_up_topics,
     _valid_subscription_topic,
 )
 from custom_components.telegraf_mqtt.const import (
+    CONF_AUTO_DISCOVER,
+    CONF_AUTO_DISCOVER_SCOPE,
+    CONF_CATEGORY_OVERRIDES,
+    CONF_CLEANUP_DELAY,
+    CONF_DELETE_DELAY,
+    CONF_DEVICE_ID_STRATEGY,
     CONF_DEVICE_NAME,
+    CONF_ENABLE_CLEANUP,
+    CONF_EXCLUDE_PATTERNS,
+    CONF_EXPIRE_AFTER,
+    CONF_FIELD_OVERRIDES,
+    CONF_MIN_ACTIVE_METRICS,
     CONF_SCAN_DURATION_SECONDS,
     CONF_SCAN_ROOT_TOPIC,
     CONF_SETUP_MODE,
@@ -254,6 +270,29 @@ async def test_reconfigure_flow_rejects_invalid_topic(hass) -> None:
     assert result["errors"] == {CONF_TOPIC_PATTERN: "invalid_topic"}
 
 
+async def test_manual_topic_blank_device_name_returns_a_form_error(hass) -> None:
+    """A whitespace-only device name is a form error, not an empty title.
+
+    ``_clean`` strips the value to ``None``, and ``_validate`` is the
+    single place that turns that into ``{CONF_DEVICE_NAME: "required"}``.
+    The step must therefore re-render the form with that error and must
+    NOT proceed to ``async_create_entry`` with a ``None`` title, which
+    would surface as an opaque ``TypeError`` naming a Home Assistant
+    internal rather than a form the user can fix.
+
+    Driven with a whitespace-only name rather than ``""`` on purpose: the
+    two are the same after ``_clean``, and this pins that the *stripped*
+    value is the one validated.
+    """
+    flow = TelegrafMqttConfigFlow()
+    result = await flow.async_step_manual_topic(
+        {CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: "   "},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "manual_topic"
+    assert result["errors"] == {CONF_DEVICE_NAME: "required"}
+
+
 async def test_reconfigure_flow_requires_device_name(hass) -> None:
     """The reconfigure step surfaces a form with ``required`` error
     when the user submits an empty device name."""
@@ -297,3 +336,233 @@ async def test_options_flow_saves_user_input(hass) -> None:
     assert result["type"] == FlowResultType.CREATE_ENTRY
     # An empty submission persists the schema's default values.
     assert isinstance(result["data"], dict)
+
+
+# ---------------------------------------------------------------------------
+# WS-B (C2): the options dialog must never reset a setting the user did not
+# touch. ``_clean_options`` persists whatever the form returns, so a schema
+# field that defaults to a CONSTANT instead of the CURRENT value silently
+# discards the user's configuration on any unrelated save.
+# ---------------------------------------------------------------------------
+
+
+_STORED_OPTIONS = {
+    CONF_EXPIRE_AFTER: 900,
+    CONF_EXCLUDE_PATTERNS: ["disk_*", "swap_*"],
+    CONF_FIELD_OVERRIDES: {"usage_idle": {"platform": "sensor"}},
+}
+
+
+def test_clean_options_preserves_untouched_settings() -> None:
+    """Submitting a single changed field must not reset the other three."""
+    cleaned = _clean_options({CONF_AUTO_DISCOVER: True}, _STORED_OPTIONS)
+
+    assert cleaned[CONF_AUTO_DISCOVER] is True
+    assert cleaned[CONF_EXPIRE_AFTER] == 900
+    assert cleaned[CONF_EXCLUDE_PATTERNS] == ["disk_*", "swap_*"]
+    assert cleaned[CONF_FIELD_OVERRIDES] == {"usage_idle": {"platform": "sensor"}}
+
+
+def test_clean_options_defaults_only_when_nothing_is_stored() -> None:
+    """With no stored options, an omitted key falls back to the documented default."""
+    cleaned = _clean_options({}, {})
+
+    assert cleaned[CONF_EXPIRE_AFTER] == 120
+    assert cleaned[CONF_EXCLUDE_PATTERNS] == []
+    assert cleaned[CONF_FIELD_OVERRIDES] == {}
+
+
+def _schema_defaults(current: dict) -> dict:
+    """Return ``{key: default}`` for every marker in an options schema."""
+    schema = _build_options_schema(current)
+    return {str(marker): marker.default() for marker in schema.schema}
+
+
+def test_options_schema_prefills_every_field_from_current_options() -> None:
+    """Every option in the form carries the CURRENT value as its default.
+
+    This is the schema-level tripwire for C2: the three fields that used to
+    hardcode a constant default (``expire_after``, ``exclude_patterns``,
+    ``field_overrides``) now read from ``current_options``, so an untouched
+    field round-trips to the value the user already saved.
+    """
+    defaults = _schema_defaults(_STORED_OPTIONS)
+
+    assert defaults[CONF_EXPIRE_AFTER] == 900
+    assert defaults[CONF_EXCLUDE_PATTERNS] == ["disk_*", "swap_*"]
+    assert defaults[CONF_FIELD_OVERRIDES] == {"usage_idle": {"platform": "sensor"}}
+
+
+async def test_options_flow_round_trip_preserves_stored_options(hass) -> None:
+    """End-to-end: open the dialog, change one field, save -- the rest survive."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Telegraf",
+        data={CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: "Telegraf"},
+        options=dict(_STORED_OPTIONS),
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={CONF_AUTO_DISCOVER: True},
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_EXPIRE_AFTER] == 900
+    assert entry.options[CONF_EXCLUDE_PATTERNS] == ["disk_*", "swap_*"]
+    assert entry.options[CONF_FIELD_OVERRIDES] == {"usage_idle": {"platform": "sensor"}}
+    assert entry.options[CONF_AUTO_DISCOVER] is True
+
+
+# ---------------------------------------------------------------------------
+# AC6: "Saving the options dialog with no field edited leaves entry.options
+# byte-identical", and by extension changing exactly one field must leave
+# every other field byte-for-byte as it was.
+#
+# The prior assertions spot-check three keys. This one diffs the WHOLE
+# dict, so an option added to the form later is covered automatically
+# rather than needing its own assertion. It also seeds deliberately
+# awkward values -- empty containers, a zero, a non-default strategy --
+# because those are exactly the values a ``_get`` fallback written as
+# ``stored.get(key) or DEFAULT`` would silently discard.
+# ---------------------------------------------------------------------------
+
+_AC6_STORED: dict = {
+    CONF_EXPIRE_AFTER: 900,
+    CONF_EXCLUDE_PATTERNS: ["disk_*", "swap_*"],
+    CONF_FIELD_OVERRIDES: {"usage_idle": {"platform": "sensor"}},
+    CONF_CATEGORY_OVERRIDES: {"mem_used": "config"},
+    CONF_ENABLE_CLEANUP: False,
+    CONF_CLEANUP_DELAY: 0,
+    CONF_DELETE_DELAY: 86_400,
+    CONF_MIN_ACTIVE_METRICS: 0,
+    CONF_DEVICE_ID_STRATEGY: "topic_only",
+    CONF_AUTO_DISCOVER: True,
+    CONF_AUTO_DISCOVER_SCOPE: "telegraf/mine/#",
+}
+
+
+def _edited_value_for(key: str) -> object:
+    """A plausible *new* value for ``key``, of the same shape it already has.
+
+    The real form always submits a well-typed value for every field, so a
+    generic sentinel string would be testing ``_clean_options``'s coercion
+    (``list("x")`` raises) rather than its preservation. Editing means
+    changing one field to a DIFFERENT value of its own type.
+    """
+    current = _AC6_STORED[key]
+    if isinstance(current, bool):
+        return not current
+    if isinstance(current, int):
+        return current + 4242
+    if isinstance(current, list):
+        return [*current, "brand_new_*"]
+    if isinstance(current, dict):
+        return {**current, "brand_new_field": {"native_unit": "%"}}
+    return "telegraf/other/#"
+
+
+@pytest.mark.parametrize("changed_key", sorted(_AC6_STORED))
+def test_changing_one_option_leaves_every_other_option_byte_identical(changed_key: str) -> None:
+    """One edited field in, exactly one field out.
+
+    Everything the user did not touch must come back out of
+    ``_clean_options`` equal to what was stored -- same value, same type,
+    and for the container options the same emptiness. A field the user
+    legitimately set to ``0``, ``False`` or ``[]`` must survive, because
+    those are meaningful values, not "unset".
+    """
+    new_value = _edited_value_for(changed_key)
+
+    cleaned = _clean_options({changed_key: new_value}, _AC6_STORED)
+
+    for key, stored_value in _AC6_STORED.items():
+        if key == changed_key:
+            assert cleaned[key] == new_value, f"{key} should have been updated"
+        else:
+            assert cleaned[key] == stored_value, f"{key} was clobbered by an unrelated edit"
+            # Type identity too: ``900`` and ``900.0`` compare equal, and a
+            # bool/0 mixup would too. A "preserved" value of the wrong
+            # type is not preserved.
+            assert type(cleaned[key]) is type(stored_value), f"{key} changed type"
+
+    # No key invented, none dropped.
+    assert set(cleaned) == set(_AC6_STORED)
+
+
+def test_empty_containers_and_falsy_scalars_survive_untouched() -> None:
+    """Empty containers and falsy scalars are values, not absences.
+
+    Seeded with ``[]``/``{}``/``0``/``False`` and edited on an unrelated
+    key. This is the specific shape of bug a truthiness-based fallback
+    (``stored.get(key) or DEFAULT``) produces, and the case the previous
+    three-key spot check could not see.
+    """
+    stored: dict = {
+        CONF_EXCLUDE_PATTERNS: [],
+        CONF_FIELD_OVERRIDES: {},
+        CONF_CATEGORY_OVERRIDES: {},
+        CONF_CLEANUP_DELAY: 0,
+        CONF_MIN_ACTIVE_METRICS: 0,
+        CONF_ENABLE_CLEANUP: False,
+        CONF_AUTO_DISCOVER: False,
+    }
+
+    cleaned = _clean_options({CONF_EXPIRE_AFTER: 300}, stored)
+
+    assert cleaned[CONF_EXPIRE_AFTER] == 300
+    assert cleaned[CONF_EXCLUDE_PATTERNS] == []
+    assert cleaned[CONF_FIELD_OVERRIDES] == {}
+    assert cleaned[CONF_CATEGORY_OVERRIDES] == {}
+    assert cleaned[CONF_CLEANUP_DELAY] == 0
+    assert cleaned[CONF_MIN_ACTIVE_METRICS] == 0
+    assert cleaned[CONF_ENABLE_CLEANUP] is False
+    assert cleaned[CONF_AUTO_DISCOVER] is False
+
+
+async def test_options_flow_saving_one_field_preserves_the_rest_end_to_end(hass) -> None:
+    """The AC6 contract through the real flow, not just the helper.
+
+    Opens the options dialog, submits a single changed field, and diffs
+    the persisted ``entry.options`` against the previous dict. This is
+    the user-facing version of the unit test above: it also covers the
+    schema pre-fill, the voluptuous validation, and the actual
+    ``async_create_entry`` write.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Telegraf",
+        data={CONF_TOPIC_PATTERN: "telegraf/#", CONF_DEVICE_NAME: "Telegraf"},
+        options=copy.deepcopy(_AC6_STORED),
+    )
+    entry.add_to_hass(hass)
+    # ``entry.options`` is a MappingProxyType, which ``copy.deepcopy``
+    # cannot pickle, so snapshot it by hand. A shallow dict() would be
+    # enough for the scalars but would alias the two nested containers,
+    # letting a mutation hide from the comparison below.
+    before = {
+        k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v) for k, v in entry.options.items()
+    }
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        # The real form submits every field, so this is what the client
+        # actually sends: the pre-filled values for everything else.
+        user_input={**_schema_defaults(_AC6_STORED), CONF_EXPIRE_AFTER: 1800},
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_EXPIRE_AFTER] == 1800
+    for key, value in before.items():
+        if key == CONF_EXPIRE_AFTER:
+            continue
+        assert entry.options[key] == value, f"{key} was clobbered by the expire_after edit"

@@ -60,7 +60,9 @@ def test_manager_routes_descriptors_by_their_own_host() -> None:
 
     class _MixedParser:
         @staticmethod
-        def parse(payload: str | bytes) -> list:
+        def parse(payload: str | bytes, *, topic: str = "<unknown>") -> list:
+            # ``topic`` is accepted because the manager now forwards it to
+            # the parser so diagnostics can name the offending topic.
             return fake_descriptors
 
     manager.process_message("telegraf/data", "{}", parser=_MixedParser())

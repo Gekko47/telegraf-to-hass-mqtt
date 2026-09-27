@@ -4,6 +4,156 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-14
+
+Minor, not patch: the entity lifecycle, the options flow, and
+`auto_discover` all change what the user sees.
+
+### Breaking
+- **A metric that stops arriving now has its entity removed, and the
+  entity comes back if the metric returns.** Previously cleanup only
+  marked the entity unavailable, so a Telegraf plugin that is disabled
+  for a week left a permanently-unavailable entity behind forever. The
+  removal only happens after `delete_delay` seconds of silence, and only
+  for metrics eligible for cleanup (see `Fixed` for the two eligibility
+  bugs that were suppressing it). If a host comes back, its entities are
+  recreated automatically.
+- **`enable_cleanup` now also gates whole-device removal.** It previously
+  gated per-metric cleanup only, so turning it off still let an
+  indefinitely-silent host be retired after `delete_delay`. Turning it off
+  now means nothing is deleted at all -- per-metric or per-device. Marking
+  entities unavailable on silence is still unconditional. Note that
+  `enable_cleanup` defaults to **on**, so if you have never touched it,
+  devices that have been silent for `delete_delay` will now actually be
+  removed where before they were kept forever.
+- **One-time `unique_id` churn, only if you changed
+  `device_id_strategy` while the options reload was broken.** In 1.4.x,
+  changing `device_id_strategy` in the options flow saved the value but
+  never reloaded the entry, so the integration kept using the old
+  strategy's IDs. The reload now fires. If you had set a strategy
+  during that window, the first 1.5.0 start recomputes device IDs and
+  existing entities are recreated once under the correct IDs. Entity IDs,
+  history, and dashboards built on the *new* strategy are unaffected;
+  anything recorded against the *old*, unintended IDs is not carried over.
+  Users who never touched `device_id_strategy` see no churn at all.
+
+### Added
+- **`auto_discover_scope` option (default `telegraf/#`).** `auto_discover`
+  used to subscribe the discovery snoop to the entry's own topic pattern,
+  so it re-processed every message the main subscription already had and
+  discovered nothing new -- it cost 2x parse and 2x dispatcher fan-out for
+  zero benefit. The scope is now an explicit, separate, user-editable
+  filter, and the snoop skips anything the main subscription already
+  covers. Auto-discovery is now purely additive: it can only add hosts
+  your topic pattern missed, and the default still subscribes to nothing
+  wider than `telegraf/#`. **This is a live MQTT subscription** -- on a
+  shared broker, scope this to your own tree.
+- **Repairs issue for a redundant `auto_discover_scope`.** If the scope
+  is fully covered by the entry's own topic pattern, the snoop can never
+  see anything new; a warning tells you to widen the pattern or narrow the
+  scope instead of leaving you with a subscription that does nothing.
+- **Reconfigure now pre-checks the broker.** Reconfiguring to a new topic
+  pattern opens a short-lived subscription first and fails with a
+  translated, actionable error if the broker refuses it, instead of
+  writing the new pattern to the entry and only discovering the problem
+  on the next reload.
+- **Diagnostics now report pending cleanups.** Metrics waiting out their
+  `delete_delay` are listed (device IDs hashed, oldest first, with an
+  explicit `truncated` flag rather than a silently shortened list), so
+  "why did my entity just vanish" is answerable from the download.
+- **Scan failure is a form error.** A discovery scan that cannot start
+  its subscription now renders a translated error on the scan-settings
+  form instead of raising an unhandled exception into the flow.
+
+### Fixed
+- **Changing an option in the flow did not always reload the entry.**
+  Several option changes (notably `device_id_strategy`) were saved and
+  then ignored until the next HA restart. One listener now applies every
+  option change and reloads only when the change actually requires it.
+- **Two classes of metric were wrongly excluded from cleanup entirely.**
+  Metrics whose fields are static (a hostname, a version) and metrics
+  with a `never` cleanup policy were being skipped, so their entities
+  could never be removed no matter how long the host was silent.
+- **Stale device pruning was driven by a counter that was itself reset
+  by the very messages that should have expired it**, so a device
+  publishing on one field stayed alive forever while its other fields
+  were not cleaned up. Pruning is now driven by a heartbeat, so a device
+  that stops publishing is detected regardless of which fields it used to
+  publish.
+- **A field override to `platform: none` silently dropped live state
+  without removing the entity**, leaving an entity permanently stuck.
+  The entity is now removed, and removal is routed through the owning
+  platform rather than a no-op.
+- **The dispatcher fan-out was O(N^2) in the number of live entities.**
+  Every entity subscribed individually to the metric-updated signal, so
+  one incoming message invoked every listener on both platforms even
+  though only one metric changed. Each platform now holds a single
+  listener and an entity table: 1 dispatch, 1 invocation, regardless of
+  how many entities exist. Pinned by a performance test.
+- **Diagnostics reported a redacted topic that was not the topic.** The
+  parser was called without its `topic` argument, so the "last message"
+  block showed a redacted blank regardless of what had actually arrived.
+- **The setup MQTT pre-check had no timeout.** A broker that accepted the
+  TCP connection but never completed the handshake left setup hanging
+  indefinitely instead of retrying as `ConfigEntryNotReady`.
+- **An unrecognised entity category crashed the platform.** A stale or
+  hand-edited `config` / `diagnostic` override raised `ValueError` and
+  took the whole platform down. It is now logged and ignored.
+- **The scan's progress bar could re-bind to a stale task.** Starting a
+  second scan while the first was still running made the first task's
+  progress and deadline read the *second* scan's settings.
+- **Options fields were blank when you opened the options flow.**
+  Settings that had never been touched showed as empty rather than
+  showing the value actually in effect.
+- **The no-traffic repair could flap**, firing and auto-resolving on a
+  slow-but-healthy publisher. It now has a grace period.
+- **A crash inside the MQTT broker pre-check was reported as a
+  connectivity problem.** The bounded wait caught
+  `(TimeoutError, Exception)`, and since `Exception` already subsumes
+  `TimeoutError` that was a catch-all: a `TypeError` from a bad call or
+  an `AttributeError` from a changed API became a retryable
+  "broker unreachable" forever. HA retried, the entry never loaded, and
+  the traceback never reached the log -- a defect presenting as a
+  network outage. The catch is now `(TimeoutError, OSError)`, which are
+  the only two things that actually mean the broker is unusable, so
+  anything else surfaces with its real traceback.
+- **The options listener could be skipped silently.** Its registration
+  sat behind `if hasattr(entry, "add_update_listener")`. Had that guard
+  ever evaluated false, the entry would load, every option would save,
+  and none would take effect -- the same class of failure as the
+  `device_id_strategy` reload bug, recurring with no error to explain
+  it. Registration is now unconditional and directly asserted.
+- Removed the dead `MqttBrokerUnreachable` exception class. Nothing
+  could raise it: the broker-unreachable condition is reported at setup
+  as a `ConfigEntryNotReady` so HA retries, which a plain
+  `HomeAssistantError` would prevent. The `mqtt_broker_unreachable`
+  translation key is unchanged and still used.
+- **A rejected reconfigure showed a raw error key instead of an
+  explanation.** The reconfigure pre-flight (above) returns
+  `errors={"base": "cannot_connect"}`, but that string was never added to
+  `strings.json` / `translations/en.json`, so a user whose broker
+  refused the new topic pattern saw the untranslated key. Added, along
+  with a completeness test that now discovers the error keys the config
+  flow actually uses rather than a hand-kept list -- the previous list
+  had also been silently missing the `scan_failed` and
+  `auto_discover_scope_redundant` keys added in this release.
+- Removed dead code: `ParserStats.note_received` (written three times,
+  read zero) and the no-op `derive_probe_topic` that made
+  `auto_discover` inert.
+
+### Changed
+- **The snoop's seen-topic and seen-host sets are bounded.** They were
+  unbounded, so a long-lived `auto_discover` entry grew without limit.
+  They are now capped, oldest-first.
+- **Config-entry migration is additive and versioned.** Entries created
+  by an older version are upgraded in place; a version bump no longer
+  requires deleting and re-adding the integration.
+- **A setup guard for a missing topic pattern is now translated** rather
+  than a raw exception.
+- **Issue, option, and abort-reason strings are referenced by constant**
+  so the repair and config-flow code and the `strings.json` /
+  `translations/en.json` mirrors cannot drift apart silently.
+
 ## [1.4.2] - 2026-09-07
 
 ### Changed

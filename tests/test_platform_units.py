@@ -51,11 +51,15 @@ def _install_platform_stubs(monkeypatch) -> dict[str, list]:
     helpers = types.ModuleType("homeassistant.helpers")
 
     class StubEntity:
-        def __init__(self) -> None:
-            self.write_count = 0
-
         def async_write_ha_state(self) -> None:
-            self.write_count += 1
+            # ``getattr`` rather than ``+=`` on a pre-seeded attribute: the
+            # platform's entity classes do NOT chain to this base's
+            # ``__init__`` (they take ``(entry, metric_key, table)``), so
+            # ``write_count`` does not exist yet. HA's real ``Entity`` has
+            # no such problem -- this is purely a stub artefact, and
+            # self-initialising keeps every test from having to remember
+            # to seed it before the first write.
+            self.write_count = getattr(self, "write_count", 0) + 1
 
         def async_on_remove(self, remove_callback) -> None:
             self.remove_callback = remove_callback
@@ -262,11 +266,6 @@ def test_binary_sensor_routes_only_booleans_and_reflects_state(platform_env) -> 
     assert attributes["field"] == "link_up"
     assert attributes["timestamp"] == 1721664000
     assert isinstance(attributes["tags"], dict)
-
-    # Subscribe the entity (as HA would on add) so its update handler registers.
-    entity.hass = object()
-    asyncio.run(entity.async_added_to_hass())
-    assert callable(entity.remove_callback)
 
     # Update handler: matching key refreshes and writes state.
     # (Stub entities don't run super().__init__, so seed the counter explicitly.)

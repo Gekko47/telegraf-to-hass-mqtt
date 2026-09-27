@@ -48,18 +48,25 @@ def test_parser_stats_count_received_for_every_parse() -> None:
     assert stats.dropped_invalid_json == 0
 
 
-def test_parser_stats_note_received_records_metadata() -> None:
-    """``ParserStats.note_received`` is the public surface that
-    populates ``last_message`` *before* a parse outcome is known.
-    Tests pin the field set so a future refactor cannot accidentally
-    widen it (e.g. including raw bytes).
+def test_parser_stats_successful_parse_records_full_metadata() -> None:
+    """The ``last_message`` key set is closed and pinned here, because
+    every ``note_*`` helper writes the same four keys and a refactor that
+    adds "raw" / "payload" / "value_bytes" / "host" would break the
+    redaction contract.
+
+    The success path is the one that used to be unreachable in this
+    module: the old ``note_received`` helper (since removed as dead
+    code) was the only caller shape that recorded a clean
+    ``dropped_reason=None, measurement=None`` pair, and nothing in
+    production ever called it. ``note_parsed`` covers the real path.
     """
     stats = ParserStats()
-    stats.note_received(topic="telegraf/host1/cpu", byte_length=42)
+    TelegrafParser(stats=stats).parse(
+        b'{"name": "cpu", "tags": {}, "fields": {"x": 1}, "timestamp": 1}',
+        topic="telegraf/host1/cpu",
+    )
     assert stats.received == 1
     assert stats.last_message is not None
-    # The set of keys is closed; a refactor that adds "raw" / "payload"
-    # / "value_bytes" / "host" would break the redaction contract.
     assert set(stats.last_message) == {
         "topic",
         "byte_length",
@@ -67,9 +74,9 @@ def test_parser_stats_note_received_records_metadata() -> None:
         "measurement",
     }
     assert stats.last_message["topic"] == "telegraf/host1/cpu"
-    assert stats.last_message["byte_length"] == 42
+    assert stats.last_message["byte_length"] > 0
     assert stats.last_message["dropped_reason"] is None
-    assert stats.last_message["measurement"] is None
+    assert stats.last_message["measurement"] == "cpu"
 
 
 def test_parser_stats_count_dropped_invalid_json() -> None:

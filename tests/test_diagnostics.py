@@ -29,22 +29,24 @@ from custom_components.telegraf_mqtt.diagnostics import (
 )
 
 
-class _FakeState:
-    def __init__(self, measurement: str) -> None:
-        self.descriptor = type("D", (), {"measurement": measurement})
-
-
 class FakeRegistry:
     device_name = "Host One"
     last_any_metric = 995.0
 
     def __init__(self, measurements: list[str] | None = None) -> None:
-        # ``_states`` is what the diagnostics module reads to gather
-        # the per-device measurements list.
-        self._states = {f"key_{m}": _FakeState(m) for m in (measurements or [])}
+        # Mirrors the real ``MetricRegistry.measurements`` public
+        # projection. The double deliberately does NOT expose ``_states``:
+        # the diagnostics module must not read it, and a fake that
+        # happened to provide it would keep a private-access regression
+        # invisible.
+        self._measurements = list(measurements or [])
 
     def __len__(self) -> int:
-        return len(self._states)
+        return len(self._measurements)
+
+    @property
+    def measurements(self) -> frozenset[str]:
+        return frozenset(self._measurements)
 
 
 class FakeManager:
@@ -57,9 +59,41 @@ class FakeManager:
         self._delete_delay = 60 * 24 * 60 * 60
         self._enable_cleanup = True
         self._min_active_metrics = 1
+        # Two metrics are mid-queue for removal, oldest first, so the
+        # pending-cleanup block has something real to project.
+        self._pending: dict[str, list[dict]] = {
+            "host1": [
+                {
+                    "unique_key": "cpu_uptime",
+                    "cleanup_candidate_since": 10.0,
+                    "seconds_until_removal": 100.0,
+                },
+                {
+                    "unique_key": "mem_used_percent",
+                    "cleanup_candidate_since": 20.0,
+                    "seconds_until_removal": 90.0,
+                },
+            ]
+        }
 
-    def _clock(self) -> float:
+    def now(self) -> float:
+        """Mirror of the real ``DeviceManager.now()`` public accessor.
+
+        The diagnostics module calls this, not the private ``_clock``, so
+        the double models the public contract. Returning a fixed epoch is
+        what makes ``last_any_metric_age_seconds`` assertable: 1000.0 minus
+        the fake's ``last_any_metric`` of 995.0 is a 5-second age.
+        """
         return 1000.0
+
+    def pending_cleanup_all(self) -> dict[str, list[dict]]:
+        """Mirror of the real ``DeviceManager.pending_cleanup_all``.
+
+        The diagnostics block projects this, so the double has to model
+        it -- a fixture that quietly lacks a method the production code
+        calls turns a contract change into a mystery ``AttributeError``.
+        """
+        return self._pending
 
 
 class FakeParserStats:
@@ -131,9 +165,28 @@ def test_diagnostics_contains_every_spec_field() -> None:
         "title": "Telegraf",
         "unique_id": "telegraf/#",
     }
-    assert data["config"] == {
-        "data": {CONF_TOPIC_PATTERN: "telegraf/#"},
-        "options": {"expire_after": 60},
+    # M4: ``config`` is an ALLOW-LIST projection, not a verbatim dump of
+    # ``entry.data`` / ``entry.options``. The old dump published
+    # ``device_name`` (which the config flow derives from the topic) and
+    # the raw topic pattern, contradicting this module's own redaction
+    # contract. Single-segment topics carry no host, so they pass through.
+    assert data["config"]["data"]["topic_pattern"] == "telegraf/#"
+    assert "device_name" not in data["config"]["data"]
+    assert data["config"]["options"]["expire_after"] == 60
+    # Option VALUES are not published wholesale either -- only the scalar
+    # knobs and key lists, because a field NAME can name a host.
+    assert set(data["config"]["options"]) == {
+        "expire_after",
+        "enable_cleanup",
+        "cleanup_delay",
+        "delete_delay",
+        "min_active_metrics",
+        "auto_discover",
+        "auto_discover_scope",
+        "device_id_strategy",
+        "field_override_keys",
+        "category_override_keys",
+        "exclude_pattern_count",
     }
     runtime = data["runtime"]
     # Manufacturer/model are part of SPEC's "known entities" surface
@@ -164,13 +217,31 @@ def test_diagnostics_contains_every_spec_field() -> None:
     assert ps["parsed"] == 4
     assert ps["dropped_invalid_json"] == 1
     assert ps["unknown_measurement_fallbacks"] == 0
-    assert ps["last_message"]["topic"] == "telegraf/host1/cpu"
+    # The topic is REAL now (WS-E2 stopped the parser stamping
+    # "<unknown>"), but Telegraf topic trees embed the host, so it is
+    # redacted to its root plus a stable digest. That keeps the field
+    # useful -- you can tell WHICH root is failing and correlate two
+    # downloads -- without publishing ``host1``.
+    assert ps["last_message"]["topic"] == "telegraf/" + hashlib.sha256(b"telegraf/host1/cpu").hexdigest()[:8]
+    assert "host1" not in ps["last_message"]["topic"]
     assert ps["last_message"]["byte_length"] == 142
     # options_validity is per-option booleans.
     validity = data["options_validity"]
     assert validity[CONF_EXPIRE_AFTER] is True
     assert validity["cleanup_delay"] is True
     assert validity["enable_cleanup"] is True
+    # M13: the metrics currently queued for removal, so a user who
+    # suspects the integration is deleting entities can confirm it (and
+    # see how long is left) from the download alone.
+    pending = runtime["pending_cleanup"]
+    assert pending["total"] == 2
+    assert pending["truncated"] is False
+    assert [item["unique_key"] for item in pending["metrics"]] == ["cpu_uptime", "mem_used_percent"]
+    # Oldest first, and the device id hashed like everywhere else here.
+    assert pending["metrics"][0]["cleanup_candidate_since"] == 10.0
+    assert pending["metrics"][0]["seconds_until_removal"] == 100.0
+    assert pending["metrics"][0]["device_id"] == expected_device_id
+    assert "host1" not in pending["metrics"][0]["device_id"]
 
 
 def test_diagnostics_never_leaks_raw_payload() -> None:
@@ -229,6 +300,17 @@ def test_diagnostics_never_leaks_raw_payload() -> None:
         # the redaction contract protects, and the user-chosen
         # display name can echo the host in practice.
         assert "Host One" not in json.dumps(entry)
+    # The pending-cleanup block is part of the payload too, so it is
+    # subject to the same contract: keys are fine (a metric name is not
+    # a host), the device id must stay hashed.
+    for item in data["runtime"]["pending_cleanup"]["metrics"]:
+        assert "host1" not in item["device_id"]
+        assert set(item) == {
+            "device_id",
+            "unique_key",
+            "cleanup_candidate_since",
+            "seconds_until_removal",
+        }
 
 
 def test_diagnostics_omits_runtime_block_without_runtime_data() -> None:

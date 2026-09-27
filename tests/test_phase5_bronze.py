@@ -103,6 +103,10 @@ class FakeMqtt:
         self.unsubscribe_calls: int = 0
         self.raise_on_call: dict[int, type[BaseException]] = {}
 
+    async def async_wait_for_mqtt_client(self, _hass: Any) -> None:
+        """Mirror the real HA API; the integration no longer guards the call."""
+        return None
+
     async def async_subscribe(self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]) -> Callable[[], None]:
         call_index = len(self.subscribe_calls) + 1
         self.subscribe_calls.append((topic_pattern, callback))

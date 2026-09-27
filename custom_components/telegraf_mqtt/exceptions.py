@@ -31,17 +31,12 @@ class ReconfigureSubscribeFailed(TelegrafMqttException):
         )
 
 
-class MqttBrokerUnreachable(TelegrafMqttException):
-    """Raised when the MQTT broker is not reachable on initial subscribe.
-
-    Placeholders: ``topic``, ``error``.
-    Translation key: ``exceptions.mqtt_broker_unreachable``.
-    """
-
-    def __init__(self, topic: str, error: str) -> None:
-        super().__init__(
-            f"Could not reach the MQTT broker at {topic}: {error}",
-            translation_domain="telegraf_mqtt",
-            translation_key="mqtt_broker_unreachable",
-            translation_placeholders={"topic": topic, "error": error},
-        )
+# ``MqttBrokerUnreachable`` used to live here. It was deleted in 1.5.0:
+# nothing could raise it. The broker-unreachable condition is reported at
+# setup by ``__init__._broker_unreachable_not_ready``, which builds a
+# ``ConfigEntryNotReady`` so HA retries -- the only correct behaviour for
+# a transient broker outage. An ordinary ``HomeAssistantError`` is fatal
+# and would strand the user with a dead entry, so this class could not be
+# used there, and no other surface needed it. The
+# ``mqtt_broker_unreachable`` translation key is still reachable, and
+# still used, through that ``ConfigEntryNotReady``.

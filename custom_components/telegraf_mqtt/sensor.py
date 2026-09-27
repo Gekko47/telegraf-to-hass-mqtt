@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -26,21 +27,60 @@ from .models import is_bool_metric
 from .naming import infer_icon_key
 from .registry import DeviceManager
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def _entity_category(value: str | None) -> EntityCategory | None:
-    """Coerce a resolved category string into HA's enum at the platform boundary."""
-    return EntityCategory(value) if value else None
+    """Coerce a resolved category string into HA's enum at the platform boundary.
+
+    The value originates from ``category_overrides``, which is free text
+    the user types, so an unrecognised string is a *configuration* mistake
+    rather than a bug -- and HA would raise ``ValueError`` from inside
+    entity construction, which fails the whole platform setup rather than
+    the one field. Degrade to "no category" (the entity still appears in
+    the primary list) and name the offending value in the log so the user
+    can fix it.
+    """
+    if not value:
+        return None
+    try:
+        return EntityCategory(value)
+    except ValueError:
+        _LOGGER.warning(
+            "Unknown entity category %r; ignoring it. Valid values are 'config' and 'diagnostic'.",
+            value,
+        )
+        return None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    """Set up sensor entities from a config entry."""
+    """Set up sensor entities from a config entry.
+
+    **One dispatcher listener, not one per entity (WS-E3).** The table
+    ``entities`` is this platform's single index from a registry metric key
+    to the entity that owns it, and the entry-wide ``SIGNAL_METRIC_UPDATED``
+    is dispatched to exactly ONE listener -- the closure ``route_update``
+    below -- for the whole platform.
+
+    Every entity used to connect to that signal itself in
+    ``async_added_to_hass``. HA's dispatcher is a flat list, so a single
+    MQTT message carrying M changed fields invoked all N entity listeners M
+    times each. At the project's own caps (``DEFAULT_MAX_DEVICES = 50``,
+    ``MAX_METRICS_PER_DEVICE = 1000``) a ``system`` or ``disk`` payload
+    produced thousands of no-op callback invocations on the event loop, every
+    one of which re-read the registry and compared a key against itself.
+
+    With the table, the cost is one dict lookup per dispatch regardless of
+    how many entities the platform owns, and the routing re-evaluation and
+    the state write happen in the same pass over one key.
+    """
     manager = entry.runtime_data.manager
-    added: set[str] = set()
+    entities: dict[str, TelegrafMqttSensor] = {}
 
     @callback
     def add_metric(metric_key: str) -> None:
         state = manager.get_metric(metric_key)
-        if state is None or metric_key in added:
+        if state is None or metric_key in entities:
             return
         # Phase 10 platform routing: bool values belong to the
         # binary_sensor platform unless a field override forced this
@@ -48,44 +88,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         # Non-bool values are always sensor material.
         if is_bool_metric(state.value) and state.descriptor.platform_hint != PLATFORM_HINT_SENSOR:
             return
-        added.add(metric_key)
-        async_add_entities([TelegrafMqttSensor(entry, metric_key)])
+        entity = TelegrafMqttSensor(entry, metric_key, entities)
+        entities[metric_key] = entity
+        async_add_entities([entity])
 
-    # Phase 10 platform re-routing: ``field_overrides`` can flip a bool
-    # field's ``platform_hint`` (sensor <-> binary_sensor, or ``none``)
-    # after the entity has already been added, and the entity must move
-    # -- otherwise the user sees a bool value rendered as a "True/False"
-    # sensor string on the wrong platform until they reload the config
-    # entry. The registry's ``apply_options`` re-applies the override and
-    # fires ``SIGNAL_METRIC_UPDATED`` for every changed state; both
-    # platforms re-evaluate routing on that tick: the platform that no
-    # longer owns the metric drops it from ``added`` and fires
-    # ``SIGNAL_REMOVE_METRIC`` (the integration's
-    # ``_listener_remove_metric`` removes the entity from HA's entity
-    # registry), while the platform that now owns it re-adds it through
-    # the same forward check ``add_metric`` uses -- no reload needed.
+    # The combined routing + write listener. Phase 10 re-routing: a
+    # ``field_overrides`` change can flip a bool field's ``platform_hint``
+    # (sensor <-> binary_sensor, or ``none``) after the entity has already
+    # been added, and the entity must move -- otherwise the user sees a
+    # bool value rendered as a "True/False" sensor string on the wrong
+    # platform until they reload the config entry. The registry's
+    # ``apply_options`` re-applies the override and fires
+    # ``SIGNAL_METRIC_UPDATED`` for every changed state, so this single
+    # listener is where both "is this still mine?" and "write my state"
+    # are answered.
     @callback
-    def reevaluate_routing(metric_key: str) -> None:
+    def route_update(metric_key: str) -> None:
         state = manager.get_metric(metric_key)
         if state is None:
+            # The metric is gone from the registry. It may or may not still
+            # own an entity here: the ``platform_hint == "none"`` override
+            # and the cleanup lifecycle both drop the state, and only the
+            # latter sends SIGNAL_REMOVE_METRIC. Releasing the key means a
+            # metric that later returns is re-adopted rather than being
+            # permanently blocked by a stale table entry.
+            entities.pop(metric_key, None)
             return
         # Same forward check as ``add_metric``, inverted: if a bool
         # field is no longer pinned to ``sensor`` it belongs on the
         # binary_sensor platform (or, with ``hint=none``, nowhere).
         if is_bool_metric(state.value) and state.descriptor.platform_hint != PLATFORM_HINT_SENSOR:
-            if metric_key in added:
-                added.discard(metric_key)
+            if entities.pop(metric_key, None) is not None:
                 async_dispatcher_send(
                     hass,
                     SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
                     metric_key,
                 )
             return
-        # This platform now owns the metric (or the flip was undone):
-        # route through ``add_metric`` so the dedup guard and the
-        # platform check live in exactly one place. No-op while the
-        # metric is already added here.
-        add_metric(metric_key)
+        entity = entities.get(metric_key)
+        if entity is None:
+            # This platform now owns the metric (or the flip was undone):
+            # route through ``add_metric`` so the dedup guard and the
+            # platform check live in exactly one place.
+            add_metric(metric_key)
+            return
+        entity.handle_metric_updated(metric_key)
 
     for metric_key in manager:
         add_metric(metric_key)
@@ -101,7 +148,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         async_dispatcher_connect(
             hass,
             SIGNAL_METRIC_UPDATED.format(entry_id=entry.entry_id),
-            reevaluate_routing,
+            route_update,
+        )
+    )
+
+    @callback
+    def forget_metric(device_id: str, unique_key: str) -> None:
+        """Drop a metric whose entity has just been deleted.
+
+        Without this the table keeps claiming the metric even after
+        ``remove_metric_entity`` has removed the entity from HA's entity
+        registry. When the host republishes, ``on_discovered`` fires,
+        ``add_metric`` sees the key already present, and returns early --
+        so the entity never comes back until the config entry is reloaded.
+        That is the cleanup lifecycle the user is told about
+        (``Active -> Unavailable -> Cleanup Candidate -> Deleted``) silently
+        failing to reverse itself.
+        """
+        for metric_key in (f"{device_id}:{unique_key}", unique_key):
+            entities.pop(metric_key, None)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_REMOVE_METRIC.format(entry_id=entry.entry_id),
+            forget_metric,
         )
     )
 
@@ -126,9 +197,21 @@ class TelegrafMqttSensor(SensorEntity):
     _attr_translation_placeholders: Mapping[str, str] | None = None  # type: ignore[assignment]
     _attr_entity_registry_enabled_default: bool = True
 
-    def __init__(self, entry: ConfigEntry, metric_key: str) -> None:
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        metric_key: str,
+        platform_entities: dict[str, TelegrafMqttSensor] | None = None,
+    ) -> None:
         self._entry = entry
         self._metric_key = metric_key
+        # The platform's key -> entity table, so the entity can unregister
+        # itself when HA removes it for a reason the integration did not
+        # initiate (a reload, the platform being torn down, a user action).
+        # Without this the table would keep a strong reference to a dead
+        # entity forever, and its key would block the metric from ever
+        # being re-adopted.
+        self._platform_entities = platform_entities
         self._refresh_descriptor_attributes()
 
     def _refresh_descriptor_attributes(self) -> None:
@@ -166,19 +249,27 @@ class TelegrafMqttSensor(SensorEntity):
         manager: DeviceManager = self._entry.runtime_data.manager
         return manager
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to registry updates for this metric."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_METRIC_UPDATED.format(entry_id=self._entry.entry_id),
-                self._handle_metric_updated,
-            )
-        )
+    async def async_will_remove_from_hass(self) -> None:
+        """Unregister from the platform table when HA drops this entity.
+
+        The counterpart to the platform's ``forget_metric`` handler. That
+        one fires when *the integration* removes the entity; this one
+        covers every other path, so a stale key can never survive in the
+        table and silently block the metric's re-adoption.
+        """
+        if self._platform_entities is not None:
+            self._platform_entities.pop(self._metric_key, None)
 
     @callback
-    def _handle_metric_updated(self, metric_key: str) -> None:
-        """Write HA state when this metric changes."""
+    def handle_metric_updated(self, metric_key: str) -> None:
+        """Write HA state when this metric changes.
+
+        Called by the platform's single ``route_update`` listener rather
+        than by a per-entity dispatcher subscription. Kept as a public,
+        directly-callable method so a unit test can drive one entity's
+        refresh without standing up the whole platform, and so the
+        "non-matching key is ignored" contract stays testable in isolation.
+        """
         if metric_key == self._metric_key:
             self._refresh_descriptor_attributes()
             self.async_write_ha_state()

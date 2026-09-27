@@ -37,10 +37,7 @@ from custom_components.telegraf_mqtt.const import (
     CONF_TOPIC_PATTERN,
     DOMAIN,
 )
-from custom_components.telegraf_mqtt.exceptions import (
-    MqttBrokerUnreachable,
-    ReconfigureSubscribeFailed,
-)
+from custom_components.telegraf_mqtt.exceptions import ReconfigureSubscribeFailed
 from custom_components.telegraf_mqtt.icons import ICON_FOR_KEY
 from custom_components.telegraf_mqtt.models import MetricDescriptor
 from custom_components.telegraf_mqtt.naming import (
@@ -117,6 +114,10 @@ class FakeMqtt:
         self.subscribe_calls: list[tuple[str, Callable[..., Any]]] = []
         self.unsubscribe_calls: int = 0
         self.subscribe_error: Exception | None = None
+
+    async def async_wait_for_mqtt_client(self, _hass: Any) -> None:
+        """Mirror the real HA API; the integration no longer guards the call."""
+        return None
 
     async def async_subscribe(self, _hass: Any, topic_pattern: str, callback: Callable[..., Any]) -> Callable[[], None]:
         self.subscribe_calls.append((topic_pattern, callback))
@@ -612,16 +613,6 @@ def test_reconfigure_subscribe_failed_carries_translation_key() -> None:
     }
 
 
-def test_mqtt_broker_unreachable_carries_translation_key() -> None:
-    exc = MqttBrokerUnreachable("telegraf/#", "no route to host")
-    assert exc.translation_domain == "telegraf_mqtt"
-    assert exc.translation_key == "mqtt_broker_unreachable"
-    assert exc.translation_placeholders == {
-        "topic": "telegraf/#",
-        "error": "no route to host",
-    }
-
-
 def test_config_entry_not_ready_uses_mqtt_broker_unreachable_translation(monkeypatch) -> None:
     """When setup fails to subscribe, the raised ConfigEntryNotReady carries
     the mqtt_broker_unreachable translation key + placeholders."""
@@ -1078,7 +1069,7 @@ def test_stale_device_pruned_after_delete_delay() -> None:
 
     # Advance past delete_delay; the empty device is pruned.
     clock[0] = 100.0
-    pruned = manager.prune_empty_devices()
+    pruned = manager.prune_stale_devices()
     assert "old" in pruned
     assert "old" not in manager.devices
 
@@ -1115,7 +1106,7 @@ def test_stale_device_recovers_on_reappearance() -> None:
     manager.cleanup()  # ALWAYS drains immediately
     assert len(manager.devices["again"]) == 0
     clock[0] = 100.0
-    manager.prune_empty_devices()
+    manager.prune_stale_devices()
     assert "again" not in manager.devices
 
     # Reappearance: a fresh message creates a new registry for the same host.

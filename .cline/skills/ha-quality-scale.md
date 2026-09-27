@@ -34,7 +34,7 @@ Out of scope: which option exists (→ `config-options-review`); parser metadata
 | `iot_class` | `local_push` | correct — data arrives pushed over the broker, no polling |
 | `loggers` | `["custom_components.telegraf_mqtt"]` | log level configurable from the UI |
 | `requirements` | `[]` | no third-party deps; adding one is a Platinum regression |
-| `version` | `1.4.2` | must match `pyproject.toml`, `CHANGELOG.md`, `hacs.json` |
+| `version` | `1.5.0` | must match `pyproject.toml` and a `## [X.Y.Z]` heading in `CHANGELOG.md`. `hacs.json` carries **no** version field -- only `name` and the `homeassistant` floor. |
 
 CI validates this with `hassfest` (`.github/workflows/hassfest.yml`) and HACS
 with `.github/workflows/hacs.yml`. Run them locally before a release.

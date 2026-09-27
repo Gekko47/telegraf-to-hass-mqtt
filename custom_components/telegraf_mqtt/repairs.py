@@ -27,6 +27,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from .const import (
+    CONF_AUTO_DISCOVER,
+    CONF_AUTO_DISCOVER_SCOPE,
     CONF_CLEANUP_DELAY,
     CONF_DELETE_DELAY,
     CONF_ENABLE_CLEANUP,
@@ -39,7 +41,17 @@ from .const import (
     DEFAULT_EXPIRE_AFTER,
     DEFAULT_MIN_ACTIVE_METRICS,
     DOMAIN,
+    NO_TRAFFIC_GRACE_SECONDS,
+    REPAIR_AUTO_DISCOVER_SCOPE,
+    REPAIR_DEVICE_CAP,
+    REPAIR_DEVICE_ID_COLLISION,
+    REPAIR_DEVICE_ID_CONFLICT,
+    REPAIR_INVALID_OPTION,
+    REPAIR_METRIC_CAP,
+    REPAIR_NO_TRAFFIC,
+    REPAIR_OVERLAP,
 )
+from .topics import mqtt_filter_covers
 
 
 # Issue IDs are scoped to the *current* entry: no two entries can
@@ -49,32 +61,45 @@ from .const import (
 # auto-clears the prior issue on the next setup call (HA's
 # ``ir.async_create_issue`` is idempotent, but we explicitly
 # ``async_delete_issue`` when the overlap is fixed).
+#
+# The TRANSLATION keys come from ``const.REPAIR_*`` rather than inline
+# literals. They used to be inlined here while the same names sat unused in
+# ``const.py``, which is exactly why three of them (``no_traffic_on_topic``,
+# ``device_id_collision``, ``device_id_conflict``) could ship as Repairs
+# issues with no matching entry in ``strings.json`` -- the user saw a
+# broken issue in Settings and nothing in CI noticed. Importing the
+# constants makes a rename a single-site edit and lets a completeness test
+# cross-check the keys against the translation file.
 def _overlap_issue_id(entry_id: str, other_entry_id: str) -> str:
-    return f"overlap_topic_patterns_{entry_id}_{other_entry_id}"
+    return f"{REPAIR_OVERLAP}_{entry_id}_{other_entry_id}"
 
 
 def _invalid_option_issue_id(entry_id: str) -> str:
-    return f"invalid_persisted_option_{entry_id}"
+    return f"{REPAIR_INVALID_OPTION}_{entry_id}"
 
 
 def _no_traffic_issue_id(entry_id: str) -> str:
-    return f"no_traffic_on_topic_{entry_id}"
+    return f"{REPAIR_NO_TRAFFIC}_{entry_id}"
 
 
 def _device_id_collision_issue_id(entry_id: str) -> str:
-    return f"device_id_collision_{entry_id}"
+    return f"{REPAIR_DEVICE_ID_COLLISION}_{entry_id}"
 
 
 def _device_id_conflict_issue_id(entry_id: str) -> str:
-    return f"device_id_conflict_{entry_id}"
+    return f"{REPAIR_DEVICE_ID_CONFLICT}_{entry_id}"
+
+
+def _auto_discover_scope_issue_id(entry_id: str) -> str:
+    return f"{REPAIR_AUTO_DISCOVER_SCOPE}_{entry_id}"
 
 
 def _device_cap_issue_id(entry_id: str) -> str:
-    return f"device_cap_reached_{entry_id}"
+    return f"{REPAIR_DEVICE_CAP}_{entry_id}"
 
 
 def _metric_cap_issue_id(entry_id: str) -> str:
-    return f"metric_cap_reached_{entry_id}"
+    return f"{REPAIR_METRIC_CAP}_{entry_id}"
 
 
 # Conservative MQTT topic overlap check. Two patterns overlap when
@@ -208,7 +233,7 @@ def check_overlapping_topics(hass: Any, entry: Any) -> list[str]:
             issue_id=_overlap_issue_id(entry.entry_id, other.entry_id),
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
-            translation_key="overlap_topic_patterns",
+            translation_key=REPAIR_OVERLAP,
             translation_placeholders={
                 "own_topic": own,
                 "other_topic": other_pattern,
@@ -257,7 +282,7 @@ def check_invalid_persisted_option(hass: Any, entry: Any, invalid_keys: Iterable
         issue_id=_invalid_option_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="invalid_persisted_option",
+        translation_key=REPAIR_INVALID_OPTION,
         translation_placeholders=placeholders,
     )
 
@@ -266,12 +291,15 @@ def check_no_traffic(hass: Any, entry: Any) -> None:
     """Raise (or auto-resolve) a Repairs issue for "no traffic on topic".
 
     Called from the periodic ``check_expiry`` callback scheduled by
-    ``integration._schedule_expiry_check`` so the snoop listener has
-    time to receive messages before we flag the topic as silent. If
-    ``runtime_data.manager.has_received_messages()`` is False, the
-    user's configured topic pattern has matched nothing and the issue
-    is raised. The issue is auto-resolved the moment any message
-    arrives, on the next ``check_no_traffic`` tick.
+    ``integration._schedule_expiry_check``.
+
+    Fires only after SUSTAINED silence (``NO_TRAFFIC_GRACE_SECONDS``),
+    measured from the last message -- or from entry startup, if nothing
+    has ever arrived. It previously fired on "no message has EVER
+    arrived", which any host publishing more slowly than ``expire_after``
+    tripped, and because the issue also cleared on the next message the
+    card flapped: raised, auto-resolved, raised again, every cycle.
+    A Repairs panel that flickers trains users to ignore it.
     """
     ir = _ir(hass)
     if ir is None:
@@ -282,7 +310,27 @@ def check_no_traffic(hass: Any, entry: Any) -> None:
     manager = getattr(runtime_data, "manager", None)
     if manager is None:
         return
-    if manager.has_received_messages():
+    # M2: require SUSTAINED silence, not "never received anything".
+    #
+    # The old condition was ``has_received_messages()`` -- one message in
+    # the entry's entire lifetime satisfied it, and it was checked on every
+    # expiry tick. Any host publishing more slowly than ``expire_after``
+    # (120s by default) therefore saw the issue created, auto-resolved on
+    # its next message, and created again: a flapping Repairs card that
+    # trains users to ignore the Repairs panel.
+    #
+    # Silence is judged against the grace window instead, and the two
+    # "never any" vs "went quiet" cases are distinguished so a brand-new
+    # entry is not warned before its first publish interval has elapsed.
+    # Nothing having EVER arrived measures against the entry's own startup
+    # (so a freshly-added entry is not warned before Telegraf's first
+    # publish interval has had a chance to elapse); a host that went
+    # quiet measures against its last message, so only sustained silence
+    # counts.
+    since_last = manager.seconds_since_last_message()
+    silence = manager.seconds_since_startup() if since_last is None else since_last
+
+    if silence < NO_TRAFFIC_GRACE_SECONDS:
         ir.async_delete_issue(
             hass,
             domain=DOMAIN,
@@ -299,7 +347,7 @@ def check_no_traffic(hass: Any, entry: Any) -> None:
         issue_id=_no_traffic_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="no_traffic_on_topic",
+        translation_key=REPAIR_NO_TRAFFIC,
         translation_placeholders={
             "configured_topic": entry.data.get(CONF_TOPIC_PATTERN, ""),
             "seen_topics": seen_topics_preview,
@@ -344,7 +392,7 @@ def check_device_id_collision(hass: Any, entry: Any) -> None:
         issue_id=_device_id_collision_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="device_id_collision",
+        translation_key=REPAIR_DEVICE_ID_COLLISION,
         translation_placeholders={"description": description},
     )
 
@@ -401,10 +449,53 @@ def check_device_id_conflict(hass: Any, entry: Any) -> None:
         issue_id=_device_id_conflict_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="device_id_conflict",
+        translation_key=REPAIR_DEVICE_ID_CONFLICT,
         translation_placeholders={
             "conflicts": "; ".join(conflicting_entries),
         },
+    )
+
+
+def check_auto_discover_scope(hass: Any, entry: Any) -> None:
+    """Raise (or auto-resolve) a Repairs issue for a redundant scope.
+
+    The user has enabled auto-discover but set ``auto_discover_scope`` to
+    something the entry's own ``topic_pattern`` already covers
+    entirely. Every message the snoop receives is then one the snoop's
+    ``exclude_filter`` skips, so the subscription buys nothing and the
+    user is paying a second broker subscription for it.
+
+    The check is sound in the direction that matters: ``mqtt_filter_covers``
+    only returns True when coverage is provable from the two filters, so
+    a scope that genuinely adds a host will never be flagged. It is a
+    WARNING, not an error -- a redundant scope is a configuration smell,
+    not a broken entry, and auto-discover still costs the user nothing
+    beyond the extra SUBSCRIBE.
+
+    Called from ``_apply_auto_discover`` so it re-evaluates on setup, on a
+    live options toggle, and after a reconfigure-induced reload.
+    """
+    ir = _ir(hass)
+    if ir is None:
+        return
+    issue_id = _auto_discover_scope_issue_id(entry.entry_id)
+    options = getattr(entry, "options", None) or {}
+    scope = options.get(CONF_AUTO_DISCOVER_SCOPE)
+    pattern = (getattr(entry, "data", None) or {}).get(CONF_TOPIC_PATTERN)
+    if not options.get(CONF_AUTO_DISCOVER) or not isinstance(scope, str) or not isinstance(pattern, str):
+        ir.async_delete_issue(hass, domain=DOMAIN, issue_id=issue_id)
+        return
+    if not mqtt_filter_covers(pattern, scope):
+        ir.async_delete_issue(hass, domain=DOMAIN, issue_id=issue_id)
+        return
+    ir.async_create_issue(
+        hass,
+        domain=DOMAIN,
+        issue_id=issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=REPAIR_AUTO_DISCOVER_SCOPE,
+        translation_placeholders={"configured_topic": pattern, "auto_discover_scope": scope},
     )
 
 
@@ -454,7 +545,7 @@ def check_device_cap(hass: Any, entry: Any) -> None:
         issue_id=_device_cap_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="device_cap_reached",
+        translation_key=REPAIR_DEVICE_CAP,
         translation_placeholders={
             "dropped": str(dropped),
             "max_devices": str(getattr(manager, "_max_devices", 0)),
@@ -495,7 +586,7 @@ def check_metric_cap(hass: Any, entry: Any) -> None:
         issue_id=_metric_cap_issue_id(entry.entry_id),
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key="metric_cap_reached",
+        translation_key=REPAIR_METRIC_CAP,
         translation_placeholders={
             "dropped": str(dropped),
             "max_metrics_per_device": str(getattr(manager, "_max_metrics_per_device", 0)),
